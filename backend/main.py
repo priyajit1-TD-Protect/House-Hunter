@@ -57,19 +57,27 @@ def get_listings(
 
     rows = query.execute().data
 
-    # Filter by min_score (can't push into Supabase join filter easily)
+    # Normalize listing_scores — Supabase may return dict or list
+    for r in rows:
+        scores = r.get("listing_scores")
+        if isinstance(scores, dict):
+            r["listing_scores"] = [scores]
+        elif not scores:
+            r["listing_scores"] = [{}]
+
+    # Filter by min_score
     rows = [
         r for r in rows
-        if (r.get("listing_scores") or [{}])[0].get("total_score", 0) >= min_score
+        if r["listing_scores"][0].get("total_score", 0) >= min_score
     ]
 
     def sort_key(r):
-        s = (r.get("listing_scores") or [{}])[0]
+        s = r["listing_scores"][0]
         if sort_by == "price_asc":  return r.get("price", 0)
         if sort_by == "price_desc": return -r.get("price", 0)
         if sort_by == "transit":    return s.get("transit_min", 99)
         if sort_by == "school":     return -s.get("school_rating", 0)
-        return -s.get("total_score", 0)   # default: score desc
+        return -s.get("total_score", 0)
 
     return sorted(rows, key=sort_key)
 
