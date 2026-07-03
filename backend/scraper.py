@@ -83,6 +83,7 @@ async def scrape_page(client: httpx.AsyncClient, page: int) -> list[dict]:
             f"&country_code=ca"
             f"&device_type=desktop"
             f"&keep_headers=true"
+            f"&premium=true"
         )
         try:
             r = await client.post(
