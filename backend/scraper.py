@@ -1,26 +1,15 @@
 """
-Realtor.ca scraper via ScraperAPI residential proxy.
-Realtor.ca blocks cloud IPs — ScraperAPI routes through residential IPs.
-Sign up free at scraperapi.com (1000 req/month free).
+Realtor.ca scraper via ScraperAPI proxy.
 """
 import httpx
 import asyncio
 import os
+import urllib.parse
 from db import supabase_client
 from scoring import score_listing
 
 REALTOR_API = "https://api2.realtor.ca/Listing.svc/PropertySearch_Post"
 SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY", "")
-
-HEADERS = {
-    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Accept": "application/json, text/javascript, */*; q=0.01",
-    "Accept-Language": "en-CA,en;q=0.9",
-    "Referer": "https://www.realtor.ca/",
-    "Origin": "https://www.realtor.ca",
-    "X-Requested-With": "XMLHttpRequest",
-}
 
 BASE_PAYLOAD = {
     "CultureId": "1",
@@ -40,6 +29,16 @@ BASE_PAYLOAD = {
     "CurrentPage": "1",
     "PropertyTypeGroupID": "1",
     "TransactionTypeId": "2",
+}
+
+DIRECT_HEADERS = {
+    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/javascript, */*; q=0.01",
+    "Accept-Language": "en-CA,en;q=0.9",
+    "Referer": "https://www.realtor.ca/",
+    "Origin": "https://www.realtor.ca",
+    "X-Requested-With": "XMLHttpRequest",
 }
 
 
@@ -72,36 +71,37 @@ def infer_neighbourhood(address: str, sb) -> str | None:
 
 async def scrape_page(client: httpx.AsyncClient, page: int) -> list[dict]:
     payload = {**BASE_PAYLOAD, "CurrentPage": str(page)}
+    body = urllib.parse.urlencode(payload)
 
     if SCRAPER_API_KEY:
-        # Route through ScraperAPI
-        import urllib.parse
-        encoded_url = urllib.parse.quote(REALTOR_API, safe="")
-        encoded_body = urllib.parse.urlencode(payload)
-        scraper_url = (
-            f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}"
-            f"&url={encoded_url}"
-            f"&method=POST"
-            f"&body={urllib.parse.quote(encoded_body)}"
+        # ScraperAPI: pass the target URL and POST body as params
+        # Use the structured endpoint for POST requests
+        proxy_url = (
+            f"https://api.scraperapi.com/?"
+            f"api_key={SCRAPER_API_KEY}"
+            f"&url={urllib.parse.quote(REALTOR_API, safe='')}"
             f"&country_code=ca"
             f"&device_type=desktop"
+            f"&keep_headers=true"
         )
         try:
             r = await client.post(
-                "http://api.scraperapi.com/",
-                data={
-                    "api_key": SCRAPER_API_KEY,
-                    "url": REALTOR_API,
-                    "method": "POST",
-                    "body": encoded_body,
-                    "country_code": "ca",
-                    "device_type": "desktop",
-                    "keep_headers": "true",
+                proxy_url,
+                content=body,
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                    "Accept": "application/json, text/javascript, */*; q=0.01",
+                    "Referer": "https://www.realtor.ca/",
+                    "Origin": "https://www.realtor.ca",
+                    "X-Requested-With": "XMLHttpRequest",
                 },
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
                 timeout=60,
             )
-            r.raise_for_status()
+            print(f"[scraper] ScraperAPI status: {r.status_code}, length: {len(r.text)}")
+            if r.status_code != 200:
+                print(f"[scraper] Response: {r.text[:300]}")
+                return []
             data = r.json()
             results = data.get("Results", [])
             print(f"[scraper] page {page}: {len(results)} listings via ScraperAPI")
@@ -110,9 +110,9 @@ async def scrape_page(client: httpx.AsyncClient, page: int) -> list[dict]:
             print(f"[scraper] ScraperAPI error page {page}: {e}")
             return []
     else:
-        # Direct request (may be blocked on cloud IPs)
+        # Direct (will be blocked on cloud IPs but useful for local dev)
         try:
-            r = await client.post(REALTOR_API, data=payload, headers=HEADERS, timeout=30)
+            r = await client.post(REALTOR_API, content=body, headers=DIRECT_HEADERS, timeout=30)
             r.raise_for_status()
             data = r.json()
             results = data.get("Results", [])
@@ -139,7 +139,7 @@ async def scrape_and_upsert():
     print(f"[scraper] total fetched: {len(all_results)} listings")
 
     if not all_results:
-        print("[scraper] No results — add SCRAPER_API_KEY to Railway env vars.")
+        print("[scraper] No results — check SCRAPER_API_KEY and logs above.")
         return
 
     upserted = 0
@@ -192,7 +192,6 @@ async def scrape_and_upsert():
         except Exception as e:
             print(f"[scraper] error on {item.get('MlsNumber')}: {e}")
 
-    # Mark stale listings inactive
     active_ids = [item.get("MlsNumber") for item in all_results if item.get("MlsNumber")]
     if active_ids:
         sb.table("listings").update({"is_active": False}).not_.in_("id", active_ids).execute()
