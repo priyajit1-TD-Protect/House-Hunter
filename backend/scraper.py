@@ -1,11 +1,8 @@
 """
 Realtor.ca internal API scraper.
-Realtor.ca fires a POST to api2.realtor.ca from the browser — we replicate it.
-No official API key needed; mimic the browser request exactly.
 """
 import httpx
 import asyncio
-from datetime import date
 from db import supabase_client
 from scoring import score_listing
 
@@ -13,30 +10,40 @@ REALTOR_API = "https://api2.realtor.ca/Listing.svc/PropertySearch_Post"
 
 HEADERS = {
     "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
     "Accept": "application/json, text/javascript, */*; q=0.01",
-    "Referer": "https://www.realtor.ca/",
+    "Accept-Language": "en-CA,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Referer": "https://www.realtor.ca/map#view=list&sort=6-D&pgeo=2&geoIds=g30_dpz89rm7&trans=2&dr=true&bed=3-0&bath=2-0&minprice=900000&maxprice=1700000",
     "Origin": "https://www.realtor.ca",
+    "Connection": "keep-alive",
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-site",
+    "sec-ch-ua": '"Google Chrome";v="125", "Chromium";v="125", "Not.A/Brand";v="24"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+    "X-Requested-With": "XMLHttpRequest",
 }
 
-# GTA bounding box — covers Toronto proper + inner suburbs
-SEARCH_PAYLOAD = {
+BASE_PAYLOAD = {
     "CultureId": "1",
     "ApplicationId": "1",
-    "PropertySearchTypeId": "1",   # Residential
+    "PropertySearchTypeId": "1",
     "PriceMin": "900000",
     "PriceMax": "1700000",
-    "BedRange": "3-0",             # 3+ beds
-    "BathRange": "2-0",            # 2+ baths
+    "BedRange": "3-0",
+    "BathRange": "2-0",
     "LongitudeMin": "-79.55",
     "LongitudeMax": "-79.20",
     "LatitudeMin": "43.62",
     "LatitudeMax": "43.78",
-    "SortBy": "6",                 # Most recent
-    "SortOrder": "descending",
+    "SortBy": "6",
+    "SortOrder": "Descending",
     "RecordsPerPage": "50",
     "CurrentPage": "1",
     "PropertyTypeGroupID": "1",
+    "TransactionTypeId": "2",  # For sale
 }
 
 
@@ -46,9 +53,10 @@ def build_realtor_url(listing: dict) -> str:
 
 
 def extract_sqft(listing: dict) -> int | None:
-    """Pull sqft from Building.SizeInterior if present."""
     try:
-        size_str = listing["Building"]["SizeInterior"]
+        size_str = listing.get("Building", {}).get("SizeInterior", "")
+        if not size_str:
+            return None
         val = float(size_str.split()[0].replace(",", ""))
         unit = size_str.split()[1].lower() if len(size_str.split()) > 1 else "sqft"
         return int(val * 10.764) if "m" in unit else int(val)
@@ -57,7 +65,6 @@ def extract_sqft(listing: dict) -> int | None:
 
 
 def infer_neighbourhood(address: str, sb) -> str | None:
-    """Infer neighbourhood name from address using keywords table."""
     rows = sb.table("neighbourhoods").select("name, keywords").execute().data
     address_lower = address.lower()
     for row in rows:
@@ -68,33 +75,52 @@ def infer_neighbourhood(address: str, sb) -> str | None:
 
 
 async def scrape_page(client: httpx.AsyncClient, page: int) -> list[dict]:
-    payload = {**SEARCH_PAYLOAD, "CurrentPage": str(page)}
-    r = await client.post(REALTOR_API, data=payload, headers=HEADERS)
-    r.raise_for_status()
-    return r.json().get("Results", [])
+    payload = {**BASE_PAYLOAD, "CurrentPage": str(page)}
+    try:
+        r = await client.post(REALTOR_API, data=payload, headers=HEADERS, timeout=30)
+        r.raise_for_status()
+        data = r.json()
+        results = data.get("Results", [])
+        print(f"[scraper] page {page}: {len(results)} listings (total: {data.get('Paging', {}).get('TotalRecords', '?')})")
+        return results
+    except httpx.HTTPStatusError as e:
+        print(f"[scraper] HTTP error page {page}: {e.response.status_code} - {e.response.text[:200]}")
+        return []
+    except Exception as e:
+        print(f"[scraper] error page {page}: {e}")
+        return []
 
 
 async def scrape_and_upsert():
-    """Main scrape job — call this from the scheduler."""
+    """Main scrape job."""
     sb = supabase_client()
     all_results = []
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        # Fetch pages 1–3 for up to 150 listings
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        # First do a GET to realtor.ca to get cookies
+        try:
+            await client.get("https://www.realtor.ca/", headers={
+                "User-Agent": HEADERS["User-Agent"],
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            })
+            await asyncio.sleep(1)
+        except Exception as e:
+            print(f"[scraper] cookie fetch failed: {e}")
+
         for page in range(1, 4):
-            try:
-                results = await scrape_page(client, page)
-                all_results.extend(results)
-                print(f"[scraper] page {page}: {len(results)} listings")
-                if len(results) < 50:
-                    break  # no more pages
-                await asyncio.sleep(1)  # be polite
-            except Exception as e:
-                print(f"[scraper] error on page {page}: {e}")
+            results = await scrape_page(client, page)
+            all_results.extend(results)
+            if len(results) < 50:
                 break
+            await asyncio.sleep(2)
 
     print(f"[scraper] total fetched: {len(all_results)} listings")
 
+    if not all_results:
+        print("[scraper] No results — Realtor.ca may be blocking. Skipping upsert.")
+        return
+
+    upserted = 0
     for item in all_results:
         try:
             mls_id = item.get("MlsNumber", "")
@@ -102,8 +128,7 @@ async def scrape_and_upsert():
                 continue
 
             price = int(item.get("Property", {}).get("PriceUnformatted", 0))
-            address_obj = item.get("Property", {}).get("Address", {})
-            address = address_obj.get("AddressText", "")
+            address = item.get("Property", {}).get("Address", {}).get("AddressText", "")
             beds = int(item.get("Building", {}).get("Bedrooms", 0) or 0)
             baths_raw = item.get("Building", {}).get("BathroomTotal", "0")
             baths = int(baths_raw) if baths_raw else 0
@@ -134,23 +159,21 @@ async def scrape_and_upsert():
                 "is_active": True,
             }
 
-            # Upsert listing
             sb.table("listings").upsert(listing_row).execute()
 
-            # Score and upsert score
             score_result = score_listing(listing_row, sb)
-            score_row = {"listing_id": mls_id, **score_result}
-            sb.table("listing_scores").upsert(score_row, on_conflict="listing_id").execute()
+            sb.table("listing_scores").upsert(
+                {"listing_id": mls_id, **score_result},
+                on_conflict="listing_id"
+            ).execute()
+            upserted += 1
 
         except Exception as e:
             print(f"[scraper] error on {item.get('MlsNumber')}: {e}")
 
-    # Mark listings no longer in results as inactive
+    # Mark stale listings inactive
     active_ids = [item.get("MlsNumber") for item in all_results if item.get("MlsNumber")]
     if active_ids:
-        sb.table("listings") \
-          .update({"is_active": False}) \
-          .not_.in_("id", active_ids) \
-          .execute()
+        sb.table("listings").update({"is_active": False}).not_.in_("id", active_ids).execute()
 
-    print("[scraper] done")
+    print(f"[scraper] done — upserted {upserted} listings")
