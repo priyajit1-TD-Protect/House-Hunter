@@ -1,5 +1,6 @@
 """
 Realtor.ca scraper via ScraperAPI async jobs endpoint.
+Filters for freehold only: Detached, Semi-Detached, Townhouse (freehold).
 """
 import httpx
 import asyncio
@@ -13,23 +14,31 @@ REALTOR_API = "https://api2.realtor.ca/Listing.svc/PropertySearch_Post"
 SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY", "")
 SCRAPER_API_ENDPOINT = "https://async.scraperapi.com/jobs"
 
+# Freehold property types to keep
+FREEHOLD_TYPES = {
+    "detached", "semi-detached", "townhouse", "row / townhouse",
+    "att/row/twnhouse", "detached-condominium", "link"
+}
+
 BASE_PAYLOAD = {
     "CultureId": "1",
     "ApplicationId": "1",
-    "PropertySearchTypeId": "1",
+    "PropertySearchTypeId": "1",   # Residential
     "PriceMin": "900000",
     "PriceMax": "1700000",
     "BedRange": "3-0",
     "BathRange": "2-0",
-    "LongitudeMin": "-79.55",
-    "LongitudeMax": "-79.20",
-    "LatitudeMin": "43.62",
-    "LatitudeMax": "43.78",
+    "LongitudeMin": "-79.65",
+    "LongitudeMax": "-79.10",
+    "LatitudeMin": "43.58",
+    "LatitudeMax": "43.85",
     "SortBy": "6",
     "RecordsPerPage": "50",
     "CurrentPage": "1",
     "PropertyTypeGroupID": "1",
-    "TransactionTypeId": "2",
+    "TransactionTypeId": "2",      # For Sale
+    # BuildingTypeId 1=House, 16=Att/Row/Twnhouse, 17=Semi-Detached
+    # We fetch all and filter client-side to avoid missing types
 }
 
 REALTOR_HEADERS = {
@@ -71,6 +80,56 @@ def parse_int_field(value) -> int:
             return sum(int(x.strip()) for x in str(value).split("+"))
         except Exception:
             return 0
+
+
+def parse_price(item: dict) -> int:
+    """Extract price — Realtor.ca puts it in Property.Price (e.g. '$1,299,000')
+    or Property.PriceUnformatted (e.g. '1299000')."""
+    prop = item.get("Property", {})
+
+    # PriceUnformatted is the clean integer string
+    raw = prop.get("PriceUnformatted")
+    if raw not in (None, "", "0"):
+        try:
+            return int(str(raw).replace(",", "").replace("$", "").strip())
+        except Exception:
+            pass
+
+    # Price is formatted like "$1,299,000"
+    price_str = prop.get("Price", "")
+    if price_str:
+        import re
+        digits = re.sub(r"[^\d]", "", price_str)
+        if digits:
+            return int(digits)
+
+    return 0
+
+
+def is_freehold(item: dict) -> bool:
+    """Return True if this is a freehold property type."""
+    building = item.get("Building", {})
+    prop_type = (building.get("Type") or "").lower().strip()
+    sub_type = (building.get("SubType") or "").lower().strip()
+    ownership = (item.get("Land", {}).get("Ownership") or "").lower()
+
+    # Exclude condo/strata
+    if "condo" in ownership or "strata" in ownership:
+        return False
+    if "condo" in prop_type or "apartment" in prop_type:
+        return False
+
+    # Accept known freehold types
+    for ft in FREEHOLD_TYPES:
+        if ft in prop_type or ft in sub_type:
+            return True
+
+    # Also accept by BuildingTypeId: 1=House, 16=Row/Townhouse, 17=Semi-detached
+    building_type_id = str(item.get("Building", {}).get("BuildingTypeId", ""))
+    if building_type_id in ("1", "16", "17", "25"):
+        return True
+
+    return False
 
 
 def infer_neighbourhood(address: str, sb) -> str | None:
@@ -118,23 +177,20 @@ async def scrape_page_via_scraperapi(client: httpx.AsyncClient, page: int) -> li
             print(f"[scraper] job {job_id} status: {status} (attempt {attempt+1})")
 
             if status == "finished":
-                response_obj = status_data.get("response", {})
-                response_body = response_obj.get("body", "")
-                status_code = response_obj.get("statusCode", "?")
-                print(f"[scraper] response statusCode: {status_code}, body length: {len(response_body)}")
+                response_body = status_data.get("response", {}).get("body", "")
                 try:
                     data = json.loads(response_body)
                     results = data.get("Results", [])
-                    print(f"[scraper] page {page}: {len(results)} listings")
+                    print(f"[scraper] page {page}: {len(results)} raw listings")
                     return results
                 except Exception as e:
-                    print(f"[scraper] JSON parse error: {e}, body preview: {response_body[:200]}")
+                    print(f"[scraper] JSON parse error: {e}")
                     return []
             elif status == "failed":
-                print(f"[scraper] job failed: {status_data}")
+                print(f"[scraper] job failed")
                 return []
 
-        print(f"[scraper] job {job_id} timed out")
+        print(f"[scraper] job timed out")
         return []
 
     except Exception as e:
@@ -155,20 +211,40 @@ async def scrape_and_upsert():
                 break
             await asyncio.sleep(2)
 
-    print(f"[scraper] total fetched: {len(all_results)} listings")
+    print(f"[scraper] total raw: {len(all_results)} listings")
 
-    if not all_results:
-        print("[scraper] No results.")
+    # Filter to freehold only
+    freehold = [item for item in all_results if is_freehold(item)]
+    print(f"[scraper] freehold after filter: {len(freehold)} listings")
+
+    # Diagnostic: log the first listing's price-related fields
+    if all_results:
+        first = all_results[0]
+        prop = first.get("Property", {})
+        print(f"[scraper] DIAG Property keys: {list(prop.keys())}")
+        print(f"[scraper] DIAG Price={prop.get('Price')!r} PriceUnformatted={prop.get('PriceUnformatted')!r}")
+        bld = first.get("Building", {})
+        print(f"[scraper] DIAG Building keys: {list(bld.keys())}")
+        print(f"[scraper] DIAG Type={bld.get('Type')!r} Bedrooms={bld.get('Bedrooms')!r} Baths={bld.get('BathroomTotal')!r}")
+
+    if not freehold:
+        print("[scraper] No freehold results.")
         return
 
     upserted = 0
-    for item in all_results:
+    skipped_price = 0
+    for item in freehold:
         try:
             mls_id = item.get("MlsNumber", "")
             if not mls_id:
                 continue
 
-            price = int(item.get("Property", {}).get("PriceUnformatted", 0))
+            price = parse_price(item)
+            if price == 0:
+                skipped_price += 1
+                print(f"[scraper] skipping {mls_id} — price=0, Property keys: {list(item.get('Property', {}).keys())}")
+                continue
+
             address = item.get("Property", {}).get("Address", {}).get("AddressText", "")
             beds = parse_int_field(item.get("Building", {}).get("Bedrooms"))
             baths = parse_int_field(item.get("Building", {}).get("BathroomTotal"))
@@ -212,8 +288,8 @@ async def scrape_and_upsert():
             print(f"[scraper] error on {item.get('MlsNumber')}: {e}")
 
     # Mark stale listings inactive
-    active_ids = [item.get("MlsNumber") for item in all_results if item.get("MlsNumber")]
+    active_ids = [item.get("MlsNumber") for item in freehold if item.get("MlsNumber")]
     if active_ids:
         sb.table("listings").update({"is_active": False}).not_.in_("id", active_ids).execute()
 
-    print(f"[scraper] done — upserted {upserted} listings")
+    print(f"[scraper] done — upserted {upserted}, skipped {skipped_price} (price=0)")
