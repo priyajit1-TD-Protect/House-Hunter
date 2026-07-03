@@ -32,7 +32,7 @@ STRATEGIES = {
         "label": "Happy Big Family",
         "eligible_types": BIG_FAMILY_TYPES,
         "transit_field": "transit_min_go",     # incl. GO/rail door-to-door
-        "transit_target": 60,                  # hard ceiling is 60 min door-to-door
+        "transit_target": 70,                  # ceiling: 1h10m door-to-door
         "exclude_semi": True,
         "exclude_townhouse": True,
     },

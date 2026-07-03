@@ -11,15 +11,19 @@ from db import supabase_client
 from scoring import score_all_strategies
 from strategies import is_eligible_for
 from transit import TransitLookup
+from enrichment import (
+    resolve_sqft, resolve_income, resolve_school, resolve_canopy,
+    check_completeness,
+)
 
 REALTOR_API = "https://api2.realtor.ca/Listing.svc/PropertySearch_Post"
 SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY", "")
 SCRAPER_API_ENDPOINT = "https://async.scraperapi.com/jobs"
 
-# Hard filters applied to every listing regardless of strategy:
-# hide anything whose door-to-door transit to Union exceeds this, and
-# suppress these cities entirely.
-MAX_TRANSIT_MINUTES = 60
+# Hard filters applied to every listing:
+# per-strategy door-to-door transit ceilings, and suppressed cities.
+MAX_TRANSIT_NUCLEUS = 60      # TTC to Union
+MAX_TRANSIT_BIG_FAMILY = 70   # GO/transit door-to-door to Union (1h10m)
 SUPPRESSED_CITIES = {"brampton"}
 
 # Freehold property types to keep (Detached, Semi-Detached, Townhouse, freehold House)
@@ -154,6 +158,17 @@ def infer_neighbourhood(address: str, sb) -> str | None:
     return None
 
 
+def match_neighbourhood_full(address: str, sb) -> dict | None:
+    """Return the full neighbourhood row (income, school, canopy) for enrichment."""
+    rows = sb.table("neighbourhoods").select("*").execute().data
+    address_lower = address.lower()
+    for row in rows:
+        for kw in (row.get("keywords") or []):
+            if kw in address_lower:
+                return row
+    return None
+
+
 async def scrape_page_via_scraperapi(client: httpx.AsyncClient, page: int) -> list[dict]:
     payload = {**BASE_PAYLOAD, "CurrentPage": str(page)}
     body = urllib.parse.urlencode(payload)
@@ -248,6 +263,7 @@ async def scrape_and_upsert():
 
     upserted = 0
     skipped_price = 0
+    dropped_incomplete = 0
 
     # Transit lookups (Google Distance Matrix). Cache both TTC + GO values so we
     # don't re-charge for listings already scored.
@@ -290,7 +306,6 @@ async def scrape_and_upsert():
 
             beds = parse_int_field(building.get("Bedrooms"))
             baths = parse_int_field(building.get("BathroomTotal"))
-            sqft = extract_sqft(item)
             prop_type = prop.get("Type", "") or building.get("Type", "")
             building_type = building.get("Type", "")
             ownership = prop.get("OwnershipType", "")
@@ -299,7 +314,29 @@ async def scrape_and_upsert():
             photo = (prop.get("Photo") or [{}])[0].get("LowResPath", "")
             realtor_url = build_realtor_url(item)
             listed_str = item.get("InsertedDateUtc", "")[:10] if item.get("InsertedDateUtc") else None
-            neighbourhood = infer_neighbourhood(address, sb)
+
+            neigh = match_neighbourhood_full(address, sb)
+            neighbourhood = neigh["name"] if neigh else None
+
+            # ── ENRICHMENT: fill each metric from best available source ──
+            sqft, sqft_src           = resolve_sqft(item, address, sb)
+            income, income_src       = resolve_income(lat, lng, neigh, sb)
+            school, school_src       = resolve_school(lat, lng, address, neigh, sb)
+            canopy, canopy_src       = resolve_canopy(neigh)
+
+            # ── COMPLETENESS GATE ──
+            complete, missing = check_completeness({
+                "price": price, "beds": beds, "baths": baths,
+                "sqft": sqft, "income": income, "school": school,
+            })
+            if not complete:
+                dropped_incomplete += 1
+                print(f"[scraper] dropping {mls_id} — missing {missing}")
+                # Ensure a previously-stored version is deactivated
+                sb.table("listings").update(
+                    {"is_active": False, "data_complete": False, "missing_fields": missing}
+                ).eq("id", mls_id).execute()
+                continue
 
             listing_row = {
                 "id": mls_id,
@@ -309,12 +346,19 @@ async def scrape_and_upsert():
                 "beds": beds,
                 "baths": baths,
                 "sqft": sqft,
+                "sqft_source": sqft_src,
                 "listing_type": prop_type,
                 "listed_date": listed_str,
                 "realtor_url": realtor_url,
                 "img_url": photo,
                 "lat": lat if lat else None,
                 "lng": lng if lng else None,
+                "canopy_pct": canopy,
+                "canopy_source": canopy_src,
+                "income_source": income_src,
+                "school_source": school_src,
+                "data_complete": True,
+                "missing_fields": [],
                 "raw_json": item,
                 "is_active": True,
             }
@@ -333,12 +377,11 @@ async def scrape_and_upsert():
             if transit_go is None:
                 transit_go = transit.get_go_transit_minutes(lat, lng)
 
-            # Hard cap: hide anything over MAX_TRANSIT_MINUTES door-to-door.
-            # Nucleus judged on TTC time, Big Family on GO time. If transit is
-            # unknown (None), we don't cap on it (falls back to scoring).
-            if transit_ttc is not None and transit_ttc > MAX_TRANSIT_MINUTES:
+            # Hard caps: hide over-ceiling listings per strategy.
+            # Nucleus judged on TTC (60), Big Family on GO (70). Unknown passes.
+            if transit_ttc is not None and transit_ttc > MAX_TRANSIT_NUCLEUS:
                 elig_nucleus = False
-            if transit_go is not None and transit_go > MAX_TRANSIT_MINUTES:
+            if transit_go is not None and transit_go > MAX_TRANSIT_BIG_FAMILY:
                 elig_big = False
 
             score_result = score_all_strategies(
@@ -363,4 +406,5 @@ async def scrape_and_upsert():
         sb.table("listings").update({"is_active": False}).not_.in_("id", active_ids).execute()
 
     print(f"[scraper] done — upserted {upserted}, skipped {skipped_price} (price=0), "
+          f"dropped {dropped_incomplete} (incomplete data), "
           f"transit API calls: {transit.calls_made}")
