@@ -16,6 +16,12 @@ REALTOR_API = "https://api2.realtor.ca/Listing.svc/PropertySearch_Post"
 SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY", "")
 SCRAPER_API_ENDPOINT = "https://async.scraperapi.com/jobs"
 
+# Hard filters applied to every listing regardless of strategy:
+# hide anything whose door-to-door transit to Union exceeds this, and
+# suppress these cities entirely.
+MAX_TRANSIT_MINUTES = 60
+SUPPRESSED_CITIES = {"brampton"}
+
 # Freehold property types to keep (Detached, Semi-Detached, Townhouse, freehold House)
 FREEHOLD_TYPES = {
     "house", "detached", "semi-detached", "semi detached",
@@ -277,6 +283,11 @@ async def scrape_and_upsert():
             prop = item.get("Property", {})
             building = item.get("Building", {})
             address = prop.get("Address", {}).get("AddressText", "")
+
+            # Suppress unwanted cities (e.g. Brampton)
+            if any(city in address.lower() for city in SUPPRESSED_CITIES):
+                continue
+
             beds = parse_int_field(building.get("Bedrooms"))
             baths = parse_int_field(building.get("BathroomTotal"))
             sqft = extract_sqft(item)
@@ -309,7 +320,7 @@ async def scrape_and_upsert():
             }
             sb.table("listings").upsert(listing_row).execute()
 
-            # Per-strategy eligibility
+            # Per-strategy eligibility (property type)
             elig_nucleus = is_eligible_for(prop_type, building_type, ownership, "nucleus")
             elig_big = is_eligible_for(prop_type, building_type, ownership, "big_family")
 
@@ -321,6 +332,14 @@ async def scrape_and_upsert():
             transit_go = cached_go.get(mls_id)
             if transit_go is None:
                 transit_go = transit.get_go_transit_minutes(lat, lng)
+
+            # Hard cap: hide anything over MAX_TRANSIT_MINUTES door-to-door.
+            # Nucleus judged on TTC time, Big Family on GO time. If transit is
+            # unknown (None), we don't cap on it (falls back to scoring).
+            if transit_ttc is not None and transit_ttc > MAX_TRANSIT_MINUTES:
+                elig_nucleus = False
+            if transit_go is not None and transit_go > MAX_TRANSIT_MINUTES:
+                elig_big = False
 
             score_result = score_all_strategies(
                 listing_row, sb,

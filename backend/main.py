@@ -79,10 +79,24 @@ def get_listings(
     def is_eligible(r):
         return bool(r["listing_scores"][0].get(elig_col, False))
 
-    # Only listings eligible for the active strategy, above min_score
+    def within_transit(r):
+        # Hard cap: hide anything over 60 min door-to-door on the active
+        # strategy's transit measure. Unknown (None/99) is allowed through.
+        t = r["listing_scores"][0].get(transit_col)
+        return t is None or t <= 60
+
+    def not_suppressed(r):
+        addr = (r.get("address") or "").lower()
+        return "brampton" not in addr
+
+    # Only listings eligible for the active strategy, above min_score,
+    # within the transit cap, and not in a suppressed city.
     rows = [
         r for r in rows
-        if is_eligible(r) and strat_score(r) >= min_score
+        if is_eligible(r)
+        and strat_score(r) >= min_score
+        and within_transit(r)
+        and not_suppressed(r)
     ]
 
     # Expose the active strategy's values as the canonical fields the frontend

@@ -24,7 +24,7 @@ STRATEGIES = {
         "label": "Nucleus Family",
         "eligible_types": NUCLEUS_TYPES,
         "transit_field": "transit_min_ttc",   # TTC-only to Union
-        "transit_target": 40,                  # minutes
+        "transit_target": 40,                  # scoring gradient target (min)
         "exclude_semi": False,
         "exclude_townhouse": False,
     },
@@ -32,7 +32,7 @@ STRATEGIES = {
         "label": "Happy Big Family",
         "eligible_types": BIG_FAMILY_TYPES,
         "transit_field": "transit_min_go",     # incl. GO/rail door-to-door
-        "transit_target": 75,                  # minutes
+        "transit_target": 60,                  # hard ceiling is 60 min door-to-door
         "exclude_semi": True,
         "exclude_townhouse": True,
     },
