@@ -1,13 +1,15 @@
 "use client";
 
 import { useState } from "react";
-import { Stats } from "@/lib/types";
+import { Stats, Strategy } from "@/lib/types";
 import { formatPrice } from "@/lib/utils";
 
 interface StatsHeaderProps {
   stats: Stats | null;
   onScrapeTriggered?: () => void;
   isDev?: boolean;
+  strategy: Strategy;
+  onStrategyChange: (s: Strategy) => void;
 }
 
 function StatTile({
@@ -32,7 +34,7 @@ function StatTile({
   );
 }
 
-export function StatsHeader({ stats, onScrapeTriggered, isDev }: StatsHeaderProps) {
+export function StatsHeader({ stats, onScrapeTriggered, isDev, strategy, onStrategyChange }: StatsHeaderProps) {
   const [scraping, setScraping] = useState(false);
   const [lastSync, setLastSync] = useState<Date | null>(null);
 
@@ -52,6 +54,32 @@ export function StatsHeader({ stats, onScrapeTriggered, isDev }: StatsHeaderProp
   return (
     <header className="bg-td-premiumGreen">
       <div className="max-w-7xl mx-auto px-4 pt-6 pb-4">
+        {/* Strategy toggle */}
+        <div className="flex justify-center mb-5">
+          <div className="inline-flex bg-black/20 rounded-xl p-1 border border-white/10">
+            <button
+              onClick={() => onStrategyChange("nucleus")}
+              className={`px-4 py-2 rounded-lg text-sm font-bold transition-colors ${
+                strategy === "nucleus"
+                  ? "bg-td-digitalGreen text-white"
+                  : "text-white/60 hover:text-white"
+              }`}
+            >
+              Nucleus Family
+            </button>
+            <button
+              onClick={() => onStrategyChange("big_family")}
+              className={`px-4 py-2 rounded-lg text-sm font-bold transition-colors ${
+                strategy === "big_family"
+                  ? "bg-td-digitalGreen text-white"
+                  : "text-white/60 hover:text-white"
+              }`}
+            >
+              Happy Big Family
+            </button>
+          </div>
+        </div>
+
         {/* Title row */}
         <div className="flex items-start justify-between mb-5">
           <div>
@@ -65,10 +93,12 @@ export function StatsHeader({ stats, onScrapeTriggered, isDev }: StatsHeaderProp
               </span>
             </div>
             <h1 className="text-white font-display font-black text-2xl sm:text-3xl leading-tight">
-              Toronto Homes
+              {strategy === "nucleus" ? "Nucleus Family Homes" : "Happy Big Family Homes"}
             </h1>
             <p className="text-white/50 text-sm mt-1">
-              3+ bed · 2+ bath · 1,500+ sqft · ≤$1.7M · School 8+ · Union &lt;40 min
+              {strategy === "nucleus"
+                ? "Detached · Semi · Freehold Townhouse · $1M–$1.7M · 3–5 bed · 2–4 bath · TTC to Union <40 min"
+                : "Detached only · $1M–$1.7M · 3–5 bed · 2–4 bath · Transit incl. GO to Union <1h15m"}
             </p>
           </div>
 

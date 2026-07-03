@@ -8,7 +8,8 @@ import os
 import json
 import urllib.parse
 from db import supabase_client
-from scoring import score_listing
+from scoring import score_all_strategies
+from strategies import is_eligible_for
 from transit import TransitLookup
 
 REALTOR_API = "https://api2.realtor.ca/Listing.svc/PropertySearch_Post"
@@ -30,17 +31,17 @@ BASE_PAYLOAD = {
     "PriceMax": "1700000",
     "BedRange": "3-5",
     "BathRange": "2-4",
-    "LongitudeMin": "-79.65",
-    "LongitudeMax": "-79.10",
-    "LatitudeMin": "43.58",
-    "LatitudeMax": "43.85",
+    # Wider GTA box: covers Toronto + Oakville, Mississauga, Etobicoke, Richmond Hill.
+    # Nucleus naturally stays central (TTC <40 scoring); Big Family uses the full area.
+    "LongitudeMin": "-79.85",   # west: Oakville / Mississauga
+    "LongitudeMax": "-79.30",   # east
+    "LatitudeMin": "43.40",     # south: Oakville lakeshore
+    "LatitudeMax": "43.95",     # north: Richmond Hill
     "SortBy": "6",
     "RecordsPerPage": "50",
     "CurrentPage": "1",
     "PropertyTypeGroupID": "1",
     "TransactionTypeId": "2",      # For Sale
-    # BuildingTypeId 1=House, 16=Att/Row/Twnhouse, 17=Semi-Detached
-    # We fetch all and filter client-side to avoid missing types
 }
 
 REALTOR_HEADERS = {
@@ -209,7 +210,8 @@ async def scrape_and_upsert():
     all_results = []
 
     async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
-        for page in range(1, 4):
+        # Wider area now spans 4 regions — pull up to 6 pages (300 listings)
+        for page in range(1, 7):
             results = await scrape_page_via_scraperapi(client, page)
             all_results.extend(results)
             if len(results) < 50:
@@ -218,33 +220,50 @@ async def scrape_and_upsert():
 
     print(f"[scraper] total raw: {len(all_results)} listings")
 
-    # Filter to freehold only
-    freehold = [item for item in all_results if is_freehold(item)]
-    print(f"[scraper] freehold after filter: {len(freehold)} listings")
+    # Keep anything eligible for EITHER strategy (the union). Per-strategy
+    # eligibility is computed below and stored so the API can filter.
+    def eligible_either(item):
+        prop = item.get("Property", {})
+        building = item.get("Building", {})
+        ptype = prop.get("Type", "")
+        btype = building.get("Type", "")
+        own = prop.get("OwnershipType", "")
+        return (
+            is_eligible_for(ptype, btype, own, "nucleus")
+            or is_eligible_for(ptype, btype, own, "big_family")
+        )
 
-    if not freehold:
-        print("[scraper] No freehold results.")
+    candidates = [item for item in all_results if eligible_either(item)]
+    print(f"[scraper] eligible (either strategy): {len(candidates)} listings")
+
+    if not candidates:
+        print("[scraper] No eligible results.")
         return
 
     upserted = 0
     skipped_price = 0
 
-    # Set up transit lookups (Google Distance Matrix). Cache existing transit
-    # values so we don't re-charge for listings already scored.
+    # Transit lookups (Google Distance Matrix). Cache both TTC + GO values so we
+    # don't re-charge for listings already scored.
     transit = TransitLookup()
     existing_scores = (
         sb.table("listing_scores")
-        .select("listing_id, transit_min")
+        .select("listing_id, transit_min_ttc, transit_min_go")
         .execute()
         .data
     )
-    cached_transit = {
-        r["listing_id"]: r["transit_min"]
+    cached_ttc = {
+        r["listing_id"]: r["transit_min_ttc"]
         for r in existing_scores
-        if r.get("transit_min") is not None and r["transit_min"] < 99
+        if r.get("transit_min_ttc") is not None and r["transit_min_ttc"] < 99
+    }
+    cached_go = {
+        r["listing_id"]: r["transit_min_go"]
+        for r in existing_scores
+        if r.get("transit_min_go") is not None and r["transit_min_go"] < 99
     }
 
-    for item in freehold:
+    for item in candidates:
         try:
             mls_id = item.get("MlsNumber", "")
             if not mls_id:
@@ -253,17 +272,20 @@ async def scrape_and_upsert():
             price = parse_price(item)
             if price == 0:
                 skipped_price += 1
-                print(f"[scraper] skipping {mls_id} — price=0, Property keys: {list(item.get('Property', {}).keys())}")
                 continue
 
-            address = item.get("Property", {}).get("Address", {}).get("AddressText", "")
-            beds = parse_int_field(item.get("Building", {}).get("Bedrooms"))
-            baths = parse_int_field(item.get("Building", {}).get("BathroomTotal"))
+            prop = item.get("Property", {})
+            building = item.get("Building", {})
+            address = prop.get("Address", {}).get("AddressText", "")
+            beds = parse_int_field(building.get("Bedrooms"))
+            baths = parse_int_field(building.get("BathroomTotal"))
             sqft = extract_sqft(item)
-            prop_type = item.get("Building", {}).get("Type", "")
-            lat = float(item.get("Property", {}).get("Address", {}).get("Latitude", 0) or 0)
-            lng = float(item.get("Property", {}).get("Address", {}).get("Longitude", 0) or 0)
-            photo = (item.get("Property", {}).get("Photo") or [{}])[0].get("LowResPath", "")
+            prop_type = prop.get("Type", "") or building.get("Type", "")
+            building_type = building.get("Type", "")
+            ownership = prop.get("OwnershipType", "")
+            lat = float(prop.get("Address", {}).get("Latitude", 0) or 0)
+            lng = float(prop.get("Address", {}).get("Longitude", 0) or 0)
+            photo = (prop.get("Photo") or [{}])[0].get("LowResPath", "")
             realtor_url = build_realtor_url(item)
             listed_str = item.get("InsertedDateUtc", "")[:10] if item.get("InsertedDateUtc") else None
             neighbourhood = infer_neighbourhood(address, sb)
@@ -285,17 +307,28 @@ async def scrape_and_upsert():
                 "raw_json": item,
                 "is_active": True,
             }
-
             sb.table("listings").upsert(listing_row).execute()
 
-            # Real transit time to Union. Reuse cached value if we already have
-            # a valid one for this listing; otherwise call Google (respects cap).
-            if mls_id in cached_transit:
-                transit_min = cached_transit[mls_id]
-            else:
-                transit_min = transit.get_transit_minutes(lat, lng)
+            # Per-strategy eligibility
+            elig_nucleus = is_eligible_for(prop_type, building_type, ownership, "nucleus")
+            elig_big = is_eligible_for(prop_type, building_type, ownership, "big_family")
 
-            score_result = score_listing(listing_row, sb, transit_min_override=transit_min)
+            # Two transit measurements (cached where possible)
+            transit_ttc = cached_ttc.get(mls_id)
+            if transit_ttc is None:
+                transit_ttc = transit.get_transit_minutes(lat, lng)
+
+            transit_go = cached_go.get(mls_id)
+            if transit_go is None:
+                transit_go = transit.get_go_transit_minutes(lat, lng)
+
+            score_result = score_all_strategies(
+                listing_row, sb,
+                transit_ttc=transit_ttc,
+                transit_go=transit_go,
+                eligible_nucleus=elig_nucleus,
+                eligible_big_family=elig_big,
+            )
             sb.table("listing_scores").upsert(
                 {"listing_id": mls_id, **score_result},
                 on_conflict="listing_id"
@@ -306,7 +339,7 @@ async def scrape_and_upsert():
             print(f"[scraper] error on {item.get('MlsNumber')}: {e}")
 
     # Mark stale listings inactive
-    active_ids = [item.get("MlsNumber") for item in freehold if item.get("MlsNumber")]
+    active_ids = [item.get("MlsNumber") for item in candidates if item.get("MlsNumber")]
     if active_ids:
         sb.table("listings").update({"is_active": False}).not_.in_("id", active_ids).execute()
 

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { FilterState } from "@/lib/types";
+import { FilterState, Strategy } from "@/lib/types";
 import { getScore } from "@/lib/utils";
 import { useListings } from "@/hooks/useListings";
 import { useStats } from "@/hooks/useStats";
@@ -23,15 +23,17 @@ const isDev = process.env.NODE_ENV === "development";
 
 export default function HomePage() {
   const [filters, setFilters] = useState<FilterState>(DEFAULT_FILTERS);
+  const [strategy, setStrategy] = useState<Strategy>("nucleus");
 
   const { listings, isLoading, error, mutate } = useListings({
     maxPrice: filters.maxPrice,
     minScore: filters.minScore,
     neighbourhood: filters.neighbourhood,
     sortBy: filters.sortBy,
+    strategy,
   });
 
-  const { stats } = useStats();
+  const { stats } = useStats(strategy);
 
   const topMatch = listings.length > 0
     ? listings.reduce((a, b) => (getScore(a) >= getScore(b) ? a : b))
@@ -45,6 +47,8 @@ export default function HomePage() {
         stats={stats}
         isDev={isDev}
         onScrapeTriggered={() => mutate()}
+        strategy={strategy}
+        onStrategyChange={setStrategy}
       />
 
       <main className="flex-1 max-w-7xl mx-auto w-full px-4 py-6 space-y-5">

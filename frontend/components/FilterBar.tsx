@@ -95,7 +95,7 @@ export function FilterBar({ filters, onChange, listingCount }: FilterBarProps) {
             </label>
             <input
               type="range"
-              min={900000}
+              min={1000000}
               max={1700000}
               step={25000}
               value={filters.maxPrice}

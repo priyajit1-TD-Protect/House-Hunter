@@ -1,11 +1,11 @@
 import useSWR from "swr";
-import { Stats } from "@/lib/types";
+import { Stats, Strategy } from "@/lib/types";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
-export function useStats() {
+export function useStats(strategy: Strategy = "nucleus") {
   const { data, error, isLoading } = useSWR<Stats>(
-    "/api/stats",
+    `/api/stats?strategy=${strategy}`,
     fetcher,
     { refreshInterval: 60_000 }
   );

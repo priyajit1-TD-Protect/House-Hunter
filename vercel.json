@@ -1,0 +1,8 @@
+{
+  "services": {
+    "frontend": {
+      "src": "frontend",
+      "framework": "nextjs"
+    }
+  }
+}

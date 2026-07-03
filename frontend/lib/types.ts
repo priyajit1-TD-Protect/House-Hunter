@@ -50,9 +50,12 @@ export interface Stats {
   best_score: number;
   min_price: number;
   max_price: number;
+  strategy?: string;
 }
 
 export type SortOption = "score" | "price_asc" | "price_desc" | "transit" | "school";
+
+export type Strategy = "nucleus" | "big_family";
 
 export interface FilterState {
   maxPrice: number;

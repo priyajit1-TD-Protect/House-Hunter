@@ -15,7 +15,8 @@ UNION_LAT = 43.6452
 UNION_LNG = -79.3806
 
 # Hard safety cap: never make more than this many API calls in a single run.
-MAX_TRANSIT_LOOKUPS_PER_RUN = 60
+# Two lookups per listing (TTC + GO), so cap covers ~60 listings.
+MAX_TRANSIT_LOOKUPS_PER_RUN = 120
 
 # Eastern Time offset (EDT = UTC-4). Toronto is on daylight time most of the year;
 # for a commute estimate this is close enough and avoids a tz dependency.
@@ -49,9 +50,9 @@ class TransitLookup:
     def __init__(self):
         self.calls_made = 0
 
-    def get_transit_minutes(self, lat: float, lng: float) -> int | None:
-        """Return transit minutes from (lat, lng) to Union at 8 AM weekday.
-        Returns None if unavailable (no key, cap hit, API error, or no route)."""
+    def _lookup(self, lat: float, lng: float, transit_mode: str | None) -> int | None:
+        """Shared Distance Matrix call. transit_mode None = default (all modes).
+        Pass 'rail|train|subway|tram|bus' to bias toward regional rail (GO)."""
         if not GOOGLE_MAPS_API_KEY:
             return None
         if not lat or not lng:
@@ -67,6 +68,8 @@ class TransitLookup:
             "arrival_time": str(next_weekday_8am_epoch()),
             "key": GOOGLE_MAPS_API_KEY,
         }
+        if transit_mode:
+            params["transit_mode"] = transit_mode
 
         try:
             self.calls_made += 1
@@ -80,13 +83,21 @@ class TransitLookup:
 
             element = data["rows"][0]["elements"][0]
             if element.get("status") != "OK":
-                # ZERO_RESULTS etc. — no transit route found
-                print(f"[transit] element status: {element.get('status')}")
+                print(f"[transit] element status: {element.get('status')} (mode={transit_mode})")
                 return None
 
-            seconds = element["duration"]["value"]
-            return round(seconds / 60)
+            return round(element["duration"]["value"] / 60)
 
         except Exception as e:
-            print(f"[transit] lookup error: {e}")
+            print(f"[transit] lookup error (mode={transit_mode}): {e}")
             return None
+
+    def get_transit_minutes(self, lat: float, lng: float) -> int | None:
+        """TTC-only style commute to Union (Nucleus strategy).
+        Biases toward local transit modes (subway/bus/tram/streetcar)."""
+        return self._lookup(lat, lng, transit_mode="subway|bus|tram")
+
+    def get_go_transit_minutes(self, lat: float, lng: float) -> int | None:
+        """Door-to-door commute to Union including GO/regional rail
+        (Happy Big Family strategy). 'rail|train' biases toward GO."""
+        return self._lookup(lat, lng, transit_mode="rail|train|subway|bus")

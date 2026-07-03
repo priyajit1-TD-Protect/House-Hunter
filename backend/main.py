@@ -43,8 +43,16 @@ def get_listings(
     min_score: int = Query(0),
     neighbourhood: str = Query(None),
     sort_by: str = Query("score"),   # score | price_asc | price_desc | transit | school
+    strategy: str = Query("nucleus"),  # nucleus | big_family
     limit: int = Query(50),
 ):
+    if strategy not in ("nucleus", "big_family"):
+        strategy = "nucleus"
+
+    score_col   = f"total_score_{strategy}"
+    elig_col    = f"eligible_{strategy}"
+    transit_col = "transit_min_ttc" if strategy == "nucleus" else "transit_min_go"
+
     query = (
         sb.table("listings")
         .select("*, listing_scores(*)")
@@ -57,7 +65,7 @@ def get_listings(
 
     rows = query.execute().data
 
-    # Normalize listing_scores — Supabase may return dict or list
+    # Normalize listing_scores to a list
     for r in rows:
         scores = r.get("listing_scores")
         if isinstance(scores, dict):
@@ -65,19 +73,34 @@ def get_listings(
         elif not scores:
             r["listing_scores"] = [{}]
 
-    # Filter by min_score
+    def strat_score(r):
+        return r["listing_scores"][0].get(score_col, 0) or 0
+
+    def is_eligible(r):
+        return bool(r["listing_scores"][0].get(elig_col, False))
+
+    # Only listings eligible for the active strategy, above min_score
     rows = [
         r for r in rows
-        if r["listing_scores"][0].get("total_score", 0) >= min_score
+        if is_eligible(r) and strat_score(r) >= min_score
     ]
+
+    # Expose the active strategy's values as the canonical fields the frontend
+    # already reads (total_score, transit_min), so the UI needs no rewiring.
+    for r in rows:
+        s = r["listing_scores"][0]
+        s["total_score"] = strat_score(r)
+        s["transit_min"] = s.get(transit_col, 99)
+        s["transit_score"] = s.get(f"transit_score_{strategy}", 0)
+        s["active_strategy"] = strategy
 
     def sort_key(r):
         s = r["listing_scores"][0]
         if sort_by == "price_asc":  return r.get("price", 0)
         if sort_by == "price_desc": return -r.get("price", 0)
         if sort_by == "transit":    return s.get("transit_min", 99)
-        if sort_by == "school":     return -s.get("school_rating", 0)
-        return -s.get("total_score", 0)
+        if sort_by == "school":     return -(s.get("school_rating", 0) or 0)
+        return -strat_score(r)
 
     return sorted(rows, key=sort_key)
 
@@ -97,27 +120,44 @@ def get_listing(listing_id: str):
 
 
 @app.get("/api/stats")
-def get_stats():
-    """Aggregate stats for the dashboard header."""
+def get_stats(strategy: str = Query("nucleus")):
+    """Aggregate stats for the dashboard header, for the active strategy."""
+    if strategy not in ("nucleus", "big_family"):
+        strategy = "nucleus"
+    score_col = f"total_score_{strategy}"
+    elig_col  = f"eligible_{strategy}"
+
     rows = (
         sb.table("listings")
-        .select("price, listing_scores(total_score)")
+        .select(f"price, listing_scores({score_col}, {elig_col})")
         .eq("is_active", True)
         .execute()
         .data
     )
-    scores = [
-        (r.get("listing_scores") or [{}])[0].get("total_score", 0)
-        for r in rows
-    ]
-    prices = [r["price"] for r in rows]
+
+    def score_of(r):
+        s = r.get("listing_scores")
+        if isinstance(s, list):
+            s = s[0] if s else {}
+        return (s or {}).get(score_col, 0) or 0
+
+    def eligible(r):
+        s = r.get("listing_scores")
+        if isinstance(s, list):
+            s = s[0] if s else {}
+        return bool((s or {}).get(elig_col, False))
+
+    eligible_rows = [r for r in rows if eligible(r)]
+    scores = [score_of(r) for r in eligible_rows]
+    prices = [r["price"] for r in eligible_rows]
 
     return {
-        "active_count": len(rows),
+        "active_count": len(eligible_rows),
         "avg_score": round(sum(scores) / len(scores)) if scores else 0,
         "best_score": max(scores) if scores else 0,
         "min_price": min(prices) if prices else 0,
         "max_price": max(prices) if prices else 0,
+        "strategy": strategy,
     }
 
 

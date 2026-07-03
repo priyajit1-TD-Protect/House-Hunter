@@ -1,5 +1,5 @@
 import useSWR from "swr";
-import { Listing, SortOption } from "@/lib/types";
+import { Listing, SortOption, Strategy } from "@/lib/types";
 
 const fetcher = (url: string) =>
   fetch(url).then((r) => {
@@ -12,11 +12,13 @@ export function useListings(params: {
   minScore?: number;
   neighbourhood?: string;
   sortBy?: SortOption;
+  strategy?: Strategy;
 }) {
   const qs = new URLSearchParams({
     max_price: String(params.maxPrice ?? 1700000),
     min_score: String(params.minScore ?? 0),
     sort_by: params.sortBy ?? "score",
+    strategy: params.strategy ?? "nucleus",
     ...(params.neighbourhood && params.neighbourhood !== "All"
       ? { neighbourhood: params.neighbourhood }
       : {}),
