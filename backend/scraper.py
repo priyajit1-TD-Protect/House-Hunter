@@ -60,7 +60,18 @@ def extract_sqft(listing: dict) -> int | None:
         return None
 
 
-def infer_neighbourhood(address: str, sb) -> str | None:
+def parse_int_field(value) -> int:
+    """Parse fields like '2 + 1' or '3' into integers (takes the sum)."""
+    if not value:
+        return 0
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        try:
+            # Handle '2 + 1' format — sum all parts
+            return sum(int(x.strip()) for x in str(value).split("+"))
+        except Exception:
+            return 0
     rows = sb.table("neighbourhoods").select("name, keywords").execute().data
     address_lower = address.lower()
     for row in rows:
@@ -192,9 +203,8 @@ async def scrape_and_upsert():
 
             price = int(item.get("Property", {}).get("PriceUnformatted", 0))
             address = item.get("Property", {}).get("Address", {}).get("AddressText", "")
-            beds = int(item.get("Building", {}).get("Bedrooms", 0) or 0)
-            baths_raw = item.get("Building", {}).get("BathroomTotal", "0")
-            baths = int(baths_raw) if baths_raw else 0
+            beds = parse_int_field(item.get("Building", {}).get("Bedrooms"))
+            baths = parse_int_field(item.get("Building", {}).get("BathroomTotal"))
             sqft = extract_sqft(item)
             prop_type = item.get("Building", {}).get("Type", "")
             lat = float(item.get("Property", {}).get("Address", {}).get("Latitude", 0) or 0)
