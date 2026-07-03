@@ -1,0 +1,30 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --td-premium-green: #002B1A;
+    --td-digital-green: #008A00;
+    --td-gold: #CFBD91;
+    --td-grey: #EFEDEE;
+    --td-green-grey: #708573;
+    --td-dark-grey: #515B52;
+    --td-near-black: #1C1C1C;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  /* Smooth range input */
+  input[type="range"] {
+    @apply cursor-pointer;
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+}

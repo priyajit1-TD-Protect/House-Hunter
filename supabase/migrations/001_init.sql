@@ -1,8 +1,6 @@
--- GTA House Hunter — Supabase Init Migration
--- Run this in Supabase SQL editor
-
+-- Listings table (core)
 CREATE TABLE listings (
-  id                TEXT PRIMARY KEY,
+  id                TEXT PRIMARY KEY,          -- Realtor.ca MLS number
   address           TEXT NOT NULL,
   neighbourhood     TEXT,
   city              TEXT DEFAULT 'Toronto',
@@ -10,7 +8,7 @@ CREATE TABLE listings (
   beds              INTEGER,
   baths             INTEGER,
   sqft              INTEGER,
-  listing_type      TEXT,
+  listing_type      TEXT,                      -- 'Detached' | 'Semi-Detached' | 'Townhouse'
   listed_date       DATE,
   realtor_url       TEXT,
   img_url           TEXT,
@@ -22,6 +20,7 @@ CREATE TABLE listings (
   updated_at        TIMESTAMPTZ DEFAULT now()
 );
 
+-- Scores table
 CREATE TABLE listing_scores (
   id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   listing_id        TEXT REFERENCES listings(id) ON DELETE CASCADE,
@@ -35,10 +34,10 @@ CREATE TABLE listing_scores (
   neighbourhood_income  INTEGER,
   school_rating     NUMERIC(3,1),
   transit_min       INTEGER,
-  scored_at         TIMESTAMPTZ DEFAULT now(),
-  UNIQUE(listing_id)
+  scored_at         TIMESTAMPTZ DEFAULT now()
 );
 
+-- Neighbourhood reference data
 CREATE TABLE neighbourhoods (
   id                SERIAL PRIMARY KEY,
   name              TEXT UNIQUE NOT NULL,
@@ -49,6 +48,7 @@ CREATE TABLE neighbourhoods (
   keywords          TEXT[]
 );
 
+-- Alerts log
 CREATE TABLE alert_log (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   listing_id  TEXT REFERENCES listings(id),
@@ -57,17 +57,19 @@ CREATE TABLE alert_log (
   channel     TEXT
 );
 
-CREATE INDEX idx_listings_price    ON listings(price);
-CREATE INDEX idx_listings_active   ON listings(is_active);
-CREATE INDEX idx_scores_total      ON listing_scores(total_score DESC);
-CREATE INDEX idx_scores_listing    ON listing_scores(listing_id);
+-- Indexes
+CREATE INDEX idx_listings_price ON listings(price);
+CREATE INDEX idx_listings_active ON listings(is_active);
+CREATE INDEX idx_scores_total ON listing_scores(total_score DESC);
+CREATE INDEX idx_scores_listing ON listing_scores(listing_id);
 
+-- Seed neighbourhood data
 INSERT INTO neighbourhoods (name, avg_income, school_rating, transit_min_union, lifestyle_score, keywords) VALUES
-  ('Davisville Village',  230000, 8.4, 18,  9, ARRAY['davisville','balliol','merton','soudan','hillsdale']),
-  ('Mount Pleasant East', 215000, 8.1, 20,  8, ARRAY['mount pleasant','broadway','belsize','manor']),
-  ('High Park North',     205000, 8.3, 28, 10, ARRAY['high park','glenlake','indian road','humberside']),
-  ('High Park–Swansea',   200000, 8.0, 30, 10, ARRAY['swansea','windermere','clendenan','dunn']),
-  ('Roncesvalles',        185000, 7.8, 27,  8, ARRAY['roncesvalles','sorauren','fermanagh','garden']),
-  ('South Riverdale',     165000, 7.6, 24,  7, ARRAY['riverdale','broadview','withrow','langley','lockwood']),
-  ('Leaside South',       260000, 8.6, 33,  9, ARRAY['leaside','bessborough','moore','bayview','trace manes']),
-  ('Greenwood-Coxwell',   155000, 7.4, 26,  7, ARRAY['greenwood','coxwell','dingwall','fulton','monarch']);
+  ('Davisville Village',  230000, 8.4, 18,  9, ARRAY['davisville', 'balliol', 'merton', 'soudan']),
+  ('Mount Pleasant East', 215000, 8.1, 20,  8, ARRAY['mount pleasant', 'broadway', 'belsize']),
+  ('High Park North',     205000, 8.3, 28, 10, ARRAY['high park', 'glenlake', 'indian road']),
+  ('High Park–Swansea',   200000, 8.0, 30, 10, ARRAY['swansea', 'windermere', 'clendenan']),
+  ('Roncesvalles',        185000, 7.8, 27,  8, ARRAY['roncesvalles', 'sorauren', 'fermanagh']),
+  ('South Riverdale',     165000, 7.6, 24,  7, ARRAY['riverdale', 'broadview', 'withrow', 'langley']),
+  ('Leaside South',       260000, 8.6, 33,  9, ARRAY['leaside', 'bessborough', 'moore', 'bayview']),
+  ('Greenwood-Coxwell',   155000, 7.4, 26,  7, ARRAY['greenwood', 'coxwell', 'dingwall', 'fulton']);
