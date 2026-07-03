@@ -1,28 +1,24 @@
 """
-Realtor.ca internal API scraper.
+Realtor.ca scraper via ScraperAPI residential proxy.
+Realtor.ca blocks cloud IPs — ScraperAPI routes through residential IPs.
+Sign up free at scraperapi.com (1000 req/month free).
 """
 import httpx
 import asyncio
+import os
 from db import supabase_client
 from scoring import score_listing
 
 REALTOR_API = "https://api2.realtor.ca/Listing.svc/PropertySearch_Post"
+SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY", "")
 
 HEADERS = {
     "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
     "Accept": "application/json, text/javascript, */*; q=0.01",
     "Accept-Language": "en-CA,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Referer": "https://www.realtor.ca/map#view=list&sort=6-D&pgeo=2&geoIds=g30_dpz89rm7&trans=2&dr=true&bed=3-0&bath=2-0&minprice=900000&maxprice=1700000",
+    "Referer": "https://www.realtor.ca/",
     "Origin": "https://www.realtor.ca",
-    "Connection": "keep-alive",
-    "Sec-Fetch-Dest": "empty",
-    "Sec-Fetch-Mode": "cors",
-    "Sec-Fetch-Site": "same-site",
-    "sec-ch-ua": '"Google Chrome";v="125", "Chromium";v="125", "Not.A/Brand";v="24"',
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": '"Windows"',
     "X-Requested-With": "XMLHttpRequest",
 }
 
@@ -43,7 +39,7 @@ BASE_PAYLOAD = {
     "RecordsPerPage": "50",
     "CurrentPage": "1",
     "PropertyTypeGroupID": "1",
-    "TransactionTypeId": "2",  # For sale
+    "TransactionTypeId": "2",
 }
 
 
@@ -76,19 +72,55 @@ def infer_neighbourhood(address: str, sb) -> str | None:
 
 async def scrape_page(client: httpx.AsyncClient, page: int) -> list[dict]:
     payload = {**BASE_PAYLOAD, "CurrentPage": str(page)}
-    try:
-        r = await client.post(REALTOR_API, data=payload, headers=HEADERS, timeout=30)
-        r.raise_for_status()
-        data = r.json()
-        results = data.get("Results", [])
-        print(f"[scraper] page {page}: {len(results)} listings (total: {data.get('Paging', {}).get('TotalRecords', '?')})")
-        return results
-    except httpx.HTTPStatusError as e:
-        print(f"[scraper] HTTP error page {page}: {e.response.status_code} - {e.response.text[:200]}")
-        return []
-    except Exception as e:
-        print(f"[scraper] error page {page}: {e}")
-        return []
+
+    if SCRAPER_API_KEY:
+        # Route through ScraperAPI
+        import urllib.parse
+        encoded_url = urllib.parse.quote(REALTOR_API, safe="")
+        encoded_body = urllib.parse.urlencode(payload)
+        scraper_url = (
+            f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}"
+            f"&url={encoded_url}"
+            f"&method=POST"
+            f"&body={urllib.parse.quote(encoded_body)}"
+            f"&country_code=ca"
+            f"&device_type=desktop"
+        )
+        try:
+            r = await client.post(
+                "http://api.scraperapi.com/",
+                data={
+                    "api_key": SCRAPER_API_KEY,
+                    "url": REALTOR_API,
+                    "method": "POST",
+                    "body": encoded_body,
+                    "country_code": "ca",
+                    "device_type": "desktop",
+                    "keep_headers": "true",
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=60,
+            )
+            r.raise_for_status()
+            data = r.json()
+            results = data.get("Results", [])
+            print(f"[scraper] page {page}: {len(results)} listings via ScraperAPI")
+            return results
+        except Exception as e:
+            print(f"[scraper] ScraperAPI error page {page}: {e}")
+            return []
+    else:
+        # Direct request (may be blocked on cloud IPs)
+        try:
+            r = await client.post(REALTOR_API, data=payload, headers=HEADERS, timeout=30)
+            r.raise_for_status()
+            data = r.json()
+            results = data.get("Results", [])
+            print(f"[scraper] page {page}: {len(results)} listings (direct)")
+            return results
+        except Exception as e:
+            print(f"[scraper] direct error page {page}: {e}")
+            return []
 
 
 async def scrape_and_upsert():
@@ -96,17 +128,7 @@ async def scrape_and_upsert():
     sb = supabase_client()
     all_results = []
 
-    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-        # First do a GET to realtor.ca to get cookies
-        try:
-            await client.get("https://www.realtor.ca/", headers={
-                "User-Agent": HEADERS["User-Agent"],
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            })
-            await asyncio.sleep(1)
-        except Exception as e:
-            print(f"[scraper] cookie fetch failed: {e}")
-
+    async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
         for page in range(1, 4):
             results = await scrape_page(client, page)
             all_results.extend(results)
@@ -117,7 +139,7 @@ async def scrape_and_upsert():
     print(f"[scraper] total fetched: {len(all_results)} listings")
 
     if not all_results:
-        print("[scraper] No results — Realtor.ca may be blocking. Skipping upsert.")
+        print("[scraper] No results — add SCRAPER_API_KEY to Railway env vars.")
         return
 
     upserted = 0
@@ -160,7 +182,6 @@ async def scrape_and_upsert():
             }
 
             sb.table("listings").upsert(listing_row).execute()
-
             score_result = score_listing(listing_row, sb)
             sb.table("listing_scores").upsert(
                 {"listing_id": mls_id, **score_result},
