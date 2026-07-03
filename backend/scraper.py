@@ -26,10 +26,10 @@ BASE_PAYLOAD = {
     "CultureId": "1",
     "ApplicationId": "1",
     "PropertySearchTypeId": "1",   # Residential
-    "PriceMin": "900000",
+    "PriceMin": "1000000",
     "PriceMax": "1700000",
-    "BedRange": "3-0",
-    "BathRange": "2-0",
+    "BedRange": "3-5",
+    "BathRange": "2-4",
     "LongitudeMin": "-79.65",
     "LongitudeMax": "-79.10",
     "LatitudeMin": "43.58",
