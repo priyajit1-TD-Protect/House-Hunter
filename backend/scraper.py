@@ -1,10 +1,10 @@
 """
-Realtor.ca scraper via ScraperAPI.
-Uses ScraperAPI's /scrape structured endpoint for POST requests.
+Realtor.ca scraper via ScraperAPI async jobs endpoint.
 """
 import httpx
 import asyncio
 import os
+import json
 import urllib.parse
 from db import supabase_client
 from scoring import score_listing
@@ -61,17 +61,19 @@ def extract_sqft(listing: dict) -> int | None:
 
 
 def parse_int_field(value) -> int:
-    """Parse fields like '2 + 1' or '3' into integers (takes the sum)."""
+    """Parse fields like '2 + 1' or '3' into integers (sums all parts)."""
     if not value:
         return 0
     try:
         return int(value)
     except (ValueError, TypeError):
         try:
-            # Handle '2 + 1' format — sum all parts
             return sum(int(x.strip()) for x in str(value).split("+"))
         except Exception:
             return 0
+
+
+def infer_neighbourhood(address: str, sb) -> str | None:
     rows = sb.table("neighbourhoods").select("name, keywords").execute().data
     address_lower = address.lower()
     for row in rows:
@@ -82,11 +84,9 @@ def parse_int_field(value) -> int:
 
 
 async def scrape_page_via_scraperapi(client: httpx.AsyncClient, page: int) -> list[dict]:
-    """Use ScraperAPI async jobs endpoint for POST requests."""
     payload = {**BASE_PAYLOAD, "CurrentPage": str(page)}
     body = urllib.parse.urlencode(payload)
 
-    # Submit async job
     job_payload = {
         "apiKey": SCRAPER_API_KEY,
         "url": REALTOR_API,
@@ -99,12 +99,7 @@ async def scrape_page_via_scraperapi(client: httpx.AsyncClient, page: int) -> li
     }
 
     try:
-        # Submit the job
-        r = await client.post(
-            SCRAPER_API_ENDPOINT,
-            json=job_payload,
-            timeout=30,
-        )
+        r = await client.post(SCRAPER_API_ENDPOINT, json=job_payload, timeout=30)
         print(f"[scraper] job submit status: {r.status_code}")
         if r.status_code not in (200, 201):
             print(f"[scraper] job submit failed: {r.text[:300]}")
@@ -115,7 +110,6 @@ async def scrape_page_via_scraperapi(client: httpx.AsyncClient, page: int) -> li
         status_url = job.get("statusUrl")
         print(f"[scraper] job {job_id} submitted, polling...")
 
-        # Poll for result
         for attempt in range(30):
             await asyncio.sleep(3)
             status_r = await client.get(status_url, timeout=15)
@@ -128,15 +122,13 @@ async def scrape_page_via_scraperapi(client: httpx.AsyncClient, page: int) -> li
                 response_body = response_obj.get("body", "")
                 status_code = response_obj.get("statusCode", "?")
                 print(f"[scraper] response statusCode: {status_code}, body length: {len(response_body)}")
-                print(f"[scraper] body preview: {response_body[:500]}")
                 try:
-                    import json
                     data = json.loads(response_body)
                     results = data.get("Results", [])
-                    print(f"[scraper] page {page}: {len(results)} listings, keys: {list(data.keys())}")
+                    print(f"[scraper] page {page}: {len(results)} listings")
                     return results
                 except Exception as e:
-                    print(f"[scraper] JSON parse error: {e}, body: {response_body[:300]}")
+                    print(f"[scraper] JSON parse error: {e}, body preview: {response_body[:200]}")
                     return []
             elif status == "failed":
                 print(f"[scraper] job failed: {status_data}")
@@ -150,39 +142,14 @@ async def scrape_page_via_scraperapi(client: httpx.AsyncClient, page: int) -> li
         return []
 
 
-async def scrape_page_direct(client: httpx.AsyncClient, page: int) -> list[dict]:
-    """Direct request — works locally, blocked on cloud IPs."""
-    payload = {**BASE_PAYLOAD, "CurrentPage": str(page)}
-    body = urllib.parse.urlencode(payload)
-    try:
-        r = await client.post(
-            REALTOR_API,
-            content=body,
-            headers=REALTOR_HEADERS,
-            timeout=30,
-        )
-        r.raise_for_status()
-        data = r.json()
-        results = data.get("Results", [])
-        print(f"[scraper] page {page}: {len(results)} listings (direct)")
-        return results
-    except Exception as e:
-        print(f"[scraper] direct error page {page}: {e}")
-        return []
-
-
 async def scrape_and_upsert():
-    """Main scrape job."""
+    """Main scrape job — called on startup and every 6 hours."""
     sb = supabase_client()
     all_results = []
 
     async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
         for page in range(1, 4):
-            if SCRAPER_API_KEY:
-                results = await scrape_page_via_scraperapi(client, page)
-            else:
-                results = await scrape_page_direct(client, page)
-
+            results = await scrape_page_via_scraperapi(client, page)
             all_results.extend(results)
             if len(results) < 50:
                 break
@@ -233,6 +200,7 @@ async def scrape_and_upsert():
             }
 
             sb.table("listings").upsert(listing_row).execute()
+
             score_result = score_listing(listing_row, sb)
             sb.table("listing_scores").upsert(
                 {"listing_id": mls_id, **score_result},
@@ -243,6 +211,7 @@ async def scrape_and_upsert():
         except Exception as e:
             print(f"[scraper] error on {item.get('MlsNumber')}: {e}")
 
+    # Mark stale listings inactive
     active_ids = [item.get("MlsNumber") for item in all_results if item.get("MlsNumber")]
     if active_ids:
         sb.table("listings").update({"is_active": False}).not_.in_("id", active_ids).execute()
