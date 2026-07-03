@@ -9,15 +9,17 @@ import json
 import urllib.parse
 from db import supabase_client
 from scoring import score_listing
+from transit import TransitLookup
 
 REALTOR_API = "https://api2.realtor.ca/Listing.svc/PropertySearch_Post"
 SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY", "")
 SCRAPER_API_ENDPOINT = "https://async.scraperapi.com/jobs"
 
-# Freehold property types to keep
+# Freehold property types to keep (Detached, Semi-Detached, Townhouse, freehold House)
 FREEHOLD_TYPES = {
-    "detached", "semi-detached", "townhouse", "row / townhouse",
-    "att/row/twnhouse", "detached-condominium", "link"
+    "house", "detached", "semi-detached", "semi detached",
+    "townhouse", "row / townhouse", "att/row/twnhouse",
+    "row/townhouse", "link",
 }
 
 BASE_PAYLOAD = {
@@ -83,19 +85,17 @@ def parse_int_field(value) -> int:
 
 
 def parse_price(item: dict) -> int:
-    """Extract price — Realtor.ca puts it in Property.Price (e.g. '$1,299,000')
-    or Property.PriceUnformatted (e.g. '1299000')."""
+    """Extract price. Realtor.ca 2026 API uses Property.PriceUnformattedValue
+    (clean integer) and Property.Price (formatted '$1,600,000')."""
     prop = item.get("Property", {})
 
-    # PriceUnformatted is the clean integer string
-    raw = prop.get("PriceUnformatted")
+    raw = prop.get("PriceUnformattedValue")
     if raw not in (None, "", "0"):
         try:
             return int(str(raw).replace(",", "").replace("$", "").strip())
         except Exception:
             pass
 
-    # Price is formatted like "$1,299,000"
     price_str = prop.get("Price", "")
     if price_str:
         import re
@@ -107,27 +107,32 @@ def parse_price(item: dict) -> int:
 
 
 def is_freehold(item: dict) -> bool:
-    """Return True if this is a freehold property type."""
+    """Return True for freehold Detached / Semi-Detached / Townhouse.
+    Realtor.ca 2026: ownership is in Property.OwnershipType, type in
+    Property.Type and Building.Type."""
+    prop = item.get("Property", {})
     building = item.get("Building", {})
-    prop_type = (building.get("Type") or "").lower().strip()
-    sub_type = (building.get("SubType") or "").lower().strip()
-    ownership = (item.get("Land", {}).get("Ownership") or "").lower()
 
-    # Exclude condo/strata
+    ownership = (prop.get("OwnershipType") or "").lower()
+    prop_type = (prop.get("Type") or "").lower().strip()
+    building_type = (building.get("Type") or "").lower().strip()
+
+    combined = f"{prop_type} {building_type}"
+
+    # Exclude condo/strata ownership outright
     if "condo" in ownership or "strata" in ownership:
         return False
-    if "condo" in prop_type or "apartment" in prop_type:
+    if "condo" in combined or "apartment" in combined:
         return False
 
-    # Accept known freehold types
-    for ft in FREEHOLD_TYPES:
-        if ft in prop_type or ft in sub_type:
-            return True
-
-    # Also accept by BuildingTypeId: 1=House, 16=Row/Townhouse, 17=Semi-detached
-    building_type_id = str(item.get("Building", {}).get("BuildingTypeId", ""))
-    if building_type_id in ("1", "16", "17", "25"):
+    # Freehold ownership + a house/townhouse/semi type
+    if "freehold" in ownership:
         return True
+
+    # Accept known freehold building types even if ownership blank
+    for ft in FREEHOLD_TYPES:
+        if ft in combined:
+            return True
 
     return False
 
@@ -217,22 +222,28 @@ async def scrape_and_upsert():
     freehold = [item for item in all_results if is_freehold(item)]
     print(f"[scraper] freehold after filter: {len(freehold)} listings")
 
-    # Diagnostic: log the first listing's price-related fields
-    if all_results:
-        first = all_results[0]
-        prop = first.get("Property", {})
-        print(f"[scraper] DIAG Property keys: {list(prop.keys())}")
-        print(f"[scraper] DIAG Price={prop.get('Price')!r} PriceUnformatted={prop.get('PriceUnformatted')!r}")
-        bld = first.get("Building", {})
-        print(f"[scraper] DIAG Building keys: {list(bld.keys())}")
-        print(f"[scraper] DIAG Type={bld.get('Type')!r} Bedrooms={bld.get('Bedrooms')!r} Baths={bld.get('BathroomTotal')!r}")
-
     if not freehold:
         print("[scraper] No freehold results.")
         return
 
     upserted = 0
     skipped_price = 0
+
+    # Set up transit lookups (Google Distance Matrix). Cache existing transit
+    # values so we don't re-charge for listings already scored.
+    transit = TransitLookup()
+    existing_scores = (
+        sb.table("listing_scores")
+        .select("listing_id, transit_min")
+        .execute()
+        .data
+    )
+    cached_transit = {
+        r["listing_id"]: r["transit_min"]
+        for r in existing_scores
+        if r.get("transit_min") is not None and r["transit_min"] < 99
+    }
+
     for item in freehold:
         try:
             mls_id = item.get("MlsNumber", "")
@@ -277,7 +288,14 @@ async def scrape_and_upsert():
 
             sb.table("listings").upsert(listing_row).execute()
 
-            score_result = score_listing(listing_row, sb)
+            # Real transit time to Union. Reuse cached value if we already have
+            # a valid one for this listing; otherwise call Google (respects cap).
+            if mls_id in cached_transit:
+                transit_min = cached_transit[mls_id]
+            else:
+                transit_min = transit.get_transit_minutes(lat, lng)
+
+            score_result = score_listing(listing_row, sb, transit_min_override=transit_min)
             sb.table("listing_scores").upsert(
                 {"listing_id": mls_id, **score_result},
                 on_conflict="listing_id"
@@ -292,4 +310,5 @@ async def scrape_and_upsert():
     if active_ids:
         sb.table("listings").update({"is_active": False}).not_.in_("id", active_ids).execute()
 
-    print(f"[scraper] done — upserted {upserted}, skipped {skipped_price} (price=0)")
+    print(f"[scraper] done — upserted {upserted}, skipped {skipped_price} (price=0), "
+          f"transit API calls: {transit.calls_made}")
