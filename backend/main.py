@@ -13,10 +13,10 @@ scheduler = AsyncIOScheduler()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Run scrape immediately on boot, then every 6 hours
+    # Run scrape immediately on boot, then every 12 hours
     asyncio.create_task(scrape_and_upsert())
-    scheduler.add_job(scrape_and_upsert, "interval", hours=6, id="scrape")
-    scheduler.add_job(notify_high_scores, "interval", hours=6, id="notify")
+    scheduler.add_job(scrape_and_upsert, "interval", hours=12, id="scrape")
+    scheduler.add_job(notify_high_scores, "interval", hours=12, id="notify")
     scheduler.start()
     yield
     scheduler.shutdown()
