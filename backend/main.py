@@ -133,28 +133,6 @@ async def trigger_scrape():
     return {"status": "scrape started"}
 
 
-@app.get("/api/debug/raw")
-def debug_raw():
-    """Return one raw listing's JSON to inspect Realtor.ca field structure."""
-    result = (
-        sb.table("listings")
-        .select("id, price, raw_json")
-        .limit(1)
-        .execute()
-    )
-    if not result.data:
-        return {"error": "no listings in DB"}
-    row = result.data[0]
-    raw = row.get("raw_json", {})
-    # Return just the shape we care about
-    return {
-        "stored_price": row.get("price"),
-        "Property": raw.get("Property", {}),
-        "Building": raw.get("Building", {}),
-        "Land": raw.get("Land", {}),
-    }
-
-
 @app.get("/health")
 def health():
     return {"status": "ok"}
