@@ -26,7 +26,6 @@ BASE_PAYLOAD = {
     "LatitudeMin": "43.62",
     "LatitudeMax": "43.78",
     "SortBy": "6",
-    "SortOrder": "descending",
     "RecordsPerPage": "50",
     "CurrentPage": "1",
     "PropertyTypeGroupID": "1",
