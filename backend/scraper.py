@@ -114,15 +114,19 @@ async def scrape_page_via_scraperapi(client: httpx.AsyncClient, page: int) -> li
             print(f"[scraper] job {job_id} status: {status} (attempt {attempt+1})")
 
             if status == "finished":
-                response_body = status_data.get("response", {}).get("body", "")
+                response_obj = status_data.get("response", {})
+                response_body = response_obj.get("body", "")
+                status_code = response_obj.get("statusCode", "?")
+                print(f"[scraper] response statusCode: {status_code}, body length: {len(response_body)}")
+                print(f"[scraper] body preview: {response_body[:500]}")
                 try:
                     import json
                     data = json.loads(response_body)
                     results = data.get("Results", [])
-                    print(f"[scraper] page {page}: {len(results)} listings")
+                    print(f"[scraper] page {page}: {len(results)} listings, keys: {list(data.keys())}")
                     return results
                 except Exception as e:
-                    print(f"[scraper] JSON parse error: {e}, body: {response_body[:200]}")
+                    print(f"[scraper] JSON parse error: {e}, body: {response_body[:300]}")
                     return []
             elif status == "failed":
                 print(f"[scraper] job failed: {status_data}")
