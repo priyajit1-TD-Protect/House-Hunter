@@ -1,5 +1,6 @@
 """
-Realtor.ca scraper via ScraperAPI proxy.
+Realtor.ca scraper via ScraperAPI.
+Uses ScraperAPI's /scrape structured endpoint for POST requests.
 """
 import httpx
 import asyncio
@@ -10,6 +11,7 @@ from scoring import score_listing
 
 REALTOR_API = "https://api2.realtor.ca/Listing.svc/PropertySearch_Post"
 SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY", "")
+SCRAPER_API_ENDPOINT = "https://async.scraperapi.com/jobs"
 
 BASE_PAYLOAD = {
     "CultureId": "1",
@@ -31,7 +33,7 @@ BASE_PAYLOAD = {
     "TransactionTypeId": "2",
 }
 
-DIRECT_HEADERS = {
+REALTOR_HEADERS = {
     "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
     "Accept": "application/json, text/javascript, */*; q=0.01",
@@ -69,59 +71,90 @@ def infer_neighbourhood(address: str, sb) -> str | None:
     return None
 
 
-async def scrape_page(client: httpx.AsyncClient, page: int) -> list[dict]:
+async def scrape_page_via_scraperapi(client: httpx.AsyncClient, page: int) -> list[dict]:
+    """Use ScraperAPI async jobs endpoint for POST requests."""
     payload = {**BASE_PAYLOAD, "CurrentPage": str(page)}
     body = urllib.parse.urlencode(payload)
 
-    if SCRAPER_API_KEY:
-        # ScraperAPI: pass the target URL and POST body as params
-        # Use the structured endpoint for POST requests
-        proxy_url = (
-            f"https://api.scraperapi.com/?"
-            f"api_key={SCRAPER_API_KEY}"
-            f"&url={urllib.parse.quote(REALTOR_API, safe='')}"
-            f"&country_code=ca"
-            f"&device_type=desktop"
-            f"&keep_headers=true"
-            f"&premium=true"
+    # Submit async job
+    job_payload = {
+        "apiKey": SCRAPER_API_KEY,
+        "url": REALTOR_API,
+        "method": "POST",
+        "body": body,
+        "headers": REALTOR_HEADERS,
+        "countryCode": "ca",
+        "premium": True,
+        "keepHeaders": True,
+    }
+
+    try:
+        # Submit the job
+        r = await client.post(
+            SCRAPER_API_ENDPOINT,
+            json=job_payload,
+            timeout=30,
         )
-        try:
-            r = await client.post(
-                proxy_url,
-                content=body,
-                headers={
-                    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                    "Accept": "application/json, text/javascript, */*; q=0.01",
-                    "Referer": "https://www.realtor.ca/",
-                    "Origin": "https://www.realtor.ca",
-                    "X-Requested-With": "XMLHttpRequest",
-                },
-                timeout=60,
-            )
-            print(f"[scraper] ScraperAPI status: {r.status_code}, length: {len(r.text)}")
-            if r.status_code != 200:
-                print(f"[scraper] Response: {r.text[:300]}")
+        print(f"[scraper] job submit status: {r.status_code}")
+        if r.status_code not in (200, 201):
+            print(f"[scraper] job submit failed: {r.text[:300]}")
+            return []
+
+        job = r.json()
+        job_id = job.get("id")
+        status_url = job.get("statusUrl")
+        print(f"[scraper] job {job_id} submitted, polling...")
+
+        # Poll for result
+        for attempt in range(30):
+            await asyncio.sleep(3)
+            status_r = await client.get(status_url, timeout=15)
+            status_data = status_r.json()
+            status = status_data.get("status")
+            print(f"[scraper] job {job_id} status: {status} (attempt {attempt+1})")
+
+            if status == "finished":
+                response_body = status_data.get("response", {}).get("body", "")
+                try:
+                    import json
+                    data = json.loads(response_body)
+                    results = data.get("Results", [])
+                    print(f"[scraper] page {page}: {len(results)} listings")
+                    return results
+                except Exception as e:
+                    print(f"[scraper] JSON parse error: {e}, body: {response_body[:200]}")
+                    return []
+            elif status == "failed":
+                print(f"[scraper] job failed: {status_data}")
                 return []
-            data = r.json()
-            results = data.get("Results", [])
-            print(f"[scraper] page {page}: {len(results)} listings via ScraperAPI")
-            return results
-        except Exception as e:
-            print(f"[scraper] ScraperAPI error page {page}: {e}")
-            return []
-    else:
-        # Direct (will be blocked on cloud IPs but useful for local dev)
-        try:
-            r = await client.post(REALTOR_API, content=body, headers=DIRECT_HEADERS, timeout=30)
-            r.raise_for_status()
-            data = r.json()
-            results = data.get("Results", [])
-            print(f"[scraper] page {page}: {len(results)} listings (direct)")
-            return results
-        except Exception as e:
-            print(f"[scraper] direct error page {page}: {e}")
-            return []
+
+        print(f"[scraper] job {job_id} timed out")
+        return []
+
+    except Exception as e:
+        print(f"[scraper] ScraperAPI error page {page}: {e}")
+        return []
+
+
+async def scrape_page_direct(client: httpx.AsyncClient, page: int) -> list[dict]:
+    """Direct request — works locally, blocked on cloud IPs."""
+    payload = {**BASE_PAYLOAD, "CurrentPage": str(page)}
+    body = urllib.parse.urlencode(payload)
+    try:
+        r = await client.post(
+            REALTOR_API,
+            content=body,
+            headers=REALTOR_HEADERS,
+            timeout=30,
+        )
+        r.raise_for_status()
+        data = r.json()
+        results = data.get("Results", [])
+        print(f"[scraper] page {page}: {len(results)} listings (direct)")
+        return results
+    except Exception as e:
+        print(f"[scraper] direct error page {page}: {e}")
+        return []
 
 
 async def scrape_and_upsert():
@@ -129,9 +162,13 @@ async def scrape_and_upsert():
     sb = supabase_client()
     all_results = []
 
-    async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
         for page in range(1, 4):
-            results = await scrape_page(client, page)
+            if SCRAPER_API_KEY:
+                results = await scrape_page_via_scraperapi(client, page)
+            else:
+                results = await scrape_page_direct(client, page)
+
             all_results.extend(results)
             if len(results) < 50:
                 break
@@ -140,7 +177,7 @@ async def scrape_and_upsert():
     print(f"[scraper] total fetched: {len(all_results)} listings")
 
     if not all_results:
-        print("[scraper] No results — check SCRAPER_API_KEY and logs above.")
+        print("[scraper] No results.")
         return
 
     upserted = 0
