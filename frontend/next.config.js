@@ -10,6 +10,10 @@ const nextConfig = {
         protocol: "https",
         hostname: "cdn.realtor.ca",
       },
+      {
+        protocol: "https",
+        hostname: "images.unsplash.com",
+      },
     ],
   },
 };
