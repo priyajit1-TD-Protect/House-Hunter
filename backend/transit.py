@@ -61,6 +61,8 @@ SAMPLE_DEPARTURES = [(7, 30), (7, 45), (8, 0), (8, 15), (8, 30)]
 class TransitLookup:
     """Tracks per-run call count so we never exceed the safety cap."""
 
+    _logged_raw = False  # one-time raw-response diagnostic flag
+
     def __init__(self):
         self.calls_made = 0
 
@@ -97,6 +99,14 @@ class TransitLookup:
             r = httpx.get(DISTANCE_MATRIX_URL, params=params, timeout=15)
             r.raise_for_status()
             data = r.json()
+
+            # One-time full-response dump to diagnose systematic ZERO_RESULTS.
+            if not TransitLookup._logged_raw:
+                TransitLookup._logged_raw = True
+                import json as _json
+                print(f"[transit] RAW RESPONSE (one-time diag): {_json.dumps(data)[:800]}")
+                print(f"[transit] REQUEST origin={params['origins']} dest={params['destinations']} "
+                      f"departure_time={params['departure_time']}")
 
             if data.get("status") != "OK":
                 print(f"[transit] API status: {data.get('status')} - {data.get('error_message', '')}")
