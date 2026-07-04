@@ -158,15 +158,49 @@ def infer_neighbourhood(address: str, sb) -> str | None:
     return None
 
 
+import re as _re
+
+def _keyword_matches(keyword: str, address_lower: str) -> bool:
+    """Word-boundary aware match so short keywords like 'east' don't match
+    inside 'Willowdale East'. Multi-word keywords match as phrases."""
+    # \b ensures the keyword is a whole word/phrase, not a substring
+    return _re.search(rf"\b{_re.escape(keyword)}\b", address_lower) is not None
+
+
+def extract_area_label(address: str) -> str | None:
+    """Realtor.ca addresses look like:
+      '10 TEAGARDEN COURT|Toronto (Willowdale East), Ontario M2N5Z9'
+    The real community is in parentheses; the municipality precedes it.
+    Prefer '<Community>, <City>' e.g. 'Willowdale East, Toronto'."""
+    if not address:
+        return None
+    # community in parentheses
+    m = _re.search(r"\(([^)]+)\)", address)
+    community = m.group(1).strip() if m else None
+    # city is the token right before the '(' or before the first comma
+    city = None
+    before = address.split("(")[0]
+    # after the last '|' is usually 'City'
+    if "|" in before:
+        city = before.split("|")[-1].strip().rstrip(", ")
+    if community and city:
+        return f"{community}, {city}"
+    return community or city or None
+
+
 def match_neighbourhood_full(address: str, sb) -> dict | None:
-    """Return the full neighbourhood row (income, school, canopy) for enrichment."""
+    """Return the full neighbourhood row (income, school, canopy) for enrichment.
+    Word-boundary matching avoids false hits like 'east' inside 'Willowdale East'.
+    Longer keywords are tried first so specific names win over generic ones."""
     rows = sb.table("neighbourhoods").select("*").execute().data
     address_lower = address.lower()
+    # Sort each row's keywords longest-first; try most-specific matches first
+    best_row, best_kw_len = None, 0
     for row in rows:
-        for kw in (row.get("keywords") or []):
-            if kw in address_lower:
-                return row
-    return None
+        for kw in sorted((row.get("keywords") or []), key=len, reverse=True):
+            if _keyword_matches(kw, address_lower) and len(kw) > best_kw_len:
+                best_row, best_kw_len = row, len(kw)
+    return best_row
 
 
 async def scrape_page_via_scraperapi(client: httpx.AsyncClient, page: int) -> list[dict]:
@@ -275,12 +309,22 @@ async def scrape_and_upsert():
     # Transit lookups (Google Distance Matrix). Cache both TTC + GO values so we
     # don't re-charge for listings already scored.
     transit = TransitLookup()
-    existing_scores = (
-        sb.table("listing_scores")
-        .select("listing_id, transit_min_ttc, transit_min_go")
-        .execute()
-        .data
-    )
+    # Paginate past Supabase's 1000-row default so the cache covers ALL prior
+    # listings — otherwise old listings would be re-measured and re-charged.
+    existing_scores = []
+    _page, _PAGE = 0, 1000
+    while True:
+        _batch = (
+            sb.table("listing_scores")
+            .select("listing_id, transit_min_ttc, transit_min_go")
+            .range(_page * _PAGE, _page * _PAGE + _PAGE - 1)
+            .execute()
+            .data
+        )
+        existing_scores.extend(_batch)
+        if len(_batch) < _PAGE:
+            break
+        _page += 1
     cached_ttc = {
         r["listing_id"]: r["transit_min_ttc"]
         for r in existing_scores
@@ -323,7 +367,9 @@ async def scrape_and_upsert():
             listed_str = item.get("InsertedDateUtc", "")[:10] if item.get("InsertedDateUtc") else None
 
             neigh = match_neighbourhood_full(address, sb)
-            neighbourhood = neigh["name"] if neigh else None
+            # Display label: prefer the real community from the address
+            # (accurate), fall back to the matched neighbourhood row name.
+            neighbourhood = extract_area_label(address) or (neigh["name"] if neigh else None)
 
             # ── ENRICHMENT: fill each metric from best available source ──
             sqft, sqft_src           = resolve_sqft(item, address, sb)
@@ -385,11 +431,12 @@ async def scrape_and_upsert():
             if transit_go is None:
                 transit_go = transit.get_go_transit_minutes(lat, lng)
 
-            # Hard caps: hide over-ceiling listings per strategy.
-            # Nucleus judged on TTC (60), Big Family on GO (70). Unknown passes.
-            if transit_ttc is not None and transit_ttc > MAX_TRANSIT_NUCLEUS:
+            # Hard caps per strategy. Hide-until-measured: a listing is only
+            # eligible once real transit is known AND within the ceiling.
+            # Nucleus judged on TTC (<=60), Big Family on GO (<=70).
+            if transit_ttc is None or transit_ttc > MAX_TRANSIT_NUCLEUS:
                 elig_nucleus = False
-            if transit_go is not None and transit_go > MAX_TRANSIT_BIG_FAMILY:
+            if transit_go is None or transit_go > MAX_TRANSIT_BIG_FAMILY:
                 elig_big = False
 
             score_result = score_all_strategies(

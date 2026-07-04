@@ -80,11 +80,11 @@ def get_listings(
         return bool(r["listing_scores"][0].get(elig_col, False))
 
     def within_transit(r):
-        # Hard cap per strategy: Nucleus TTC <=60, Big Family GO <=70.
-        # Unknown (None) is allowed through.
+        # Hide-until-measured: require a known transit time within the ceiling.
+        # Nucleus TTC <=60, Big Family GO <=70. Unknown (None) is NOT shown.
         t = r["listing_scores"][0].get(transit_col)
         ceiling = 60 if strategy == "nucleus" else 70
-        return t is None or t <= ceiling
+        return t is not None and t <= ceiling
 
     def not_suppressed(r):
         addr = (r.get("address") or "").lower()

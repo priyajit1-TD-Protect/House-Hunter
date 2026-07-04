@@ -15,8 +15,10 @@ UNION_LAT = 43.6452
 UNION_LNG = -79.3806
 
 # Hard safety cap: never make more than this many API calls in a single run.
-# Two lookups per listing (TTC + GO), so cap covers ~60 listings.
-MAX_TRANSIT_LOOKUPS_PER_RUN = 120
+# 207 listings x 2 calls (TTC+GO) = ~414 for a full fresh measure. Cache means
+# steady-state runs only call for NEW listings, so this cap rarely binds and
+# monthly cost stays ~$14 (see loaders/README for the math).
+MAX_TRANSIT_LOOKUPS_PER_RUN = 450
 
 # Eastern Time offset (EDT = UTC-4). Toronto is on daylight time most of the year;
 # for a commute estimate this is close enough and avoids a tz dependency.
