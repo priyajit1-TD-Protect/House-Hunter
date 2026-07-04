@@ -100,27 +100,20 @@ class TransitLookup:
             r.raise_for_status()
             data = r.json()
 
-            # One-time full-response dump to diagnose systematic ZERO_RESULTS.
-            if not TransitLookup._logged_raw:
-                TransitLookup._logged_raw = True
-                import json as _json
-                print(f"[transit] RAW RESPONSE (one-time diag): {_json.dumps(data)[:800]}")
-                print(f"[transit] REQUEST origin={params['origins']} dest={params['destinations']} "
-                      f"departure_time={params['departure_time']}")
-
             if data.get("status") != "OK":
                 print(f"[transit] API status: {data.get('status')} - {data.get('error_message', '')}")
                 return None
 
             element = data["rows"][0]["elements"][0]
             if element.get("status") != "OK":
-                print(f"[transit] element status: {element.get('status')} (mode={transit_mode})")
+                # ZERO_RESULTS here is legitimate: no viable transit route (or
+                # an extremely long one). The listing simply won't qualify.
                 return None
 
             return round(element["duration"]["value"] / 60)
 
         except Exception as e:
-            print(f"[transit] lookup error (mode={transit_mode}): {e}")
+            print(f"[transit] lookup error: {e}")
             return None
 
     def _sampled_max(self, lat: float, lng: float) -> int | None:

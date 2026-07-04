@@ -24,7 +24,17 @@ SCRAPER_API_ENDPOINT = "https://async.scraperapi.com/jobs"
 # per-strategy door-to-door transit ceilings, and suppressed cities.
 MAX_TRANSIT_NUCLEUS = 60      # TTC to Union
 MAX_TRANSIT_BIG_FAMILY = 70   # GO/transit door-to-door to Union (1h10m)
-SUPPRESSED_CITIES = {"brampton"}
+
+# Only keep listings in these municipalities. An allow-list (rather than a
+# block-list) automatically excludes far-flung areas like Caledon, Milton,
+# Vaughan, King, etc. that a wide lat/lng box would otherwise pull in.
+# Matched against the address text (case-insensitive).
+ALLOWED_CITIES = {
+    "toronto", "oakville", "mississauga", "etobicoke", "richmond hill",
+    # Toronto's former municipalities / districts that appear in addresses:
+    "north york", "scarborough", "york", "east york",
+}
+SUPPRESSED_CITIES = {"brampton"}  # explicit block even if it sneaks past
 
 # Freehold property types to keep (Detached, Semi-Detached, Townhouse, freehold House)
 FREEHOLD_TYPES = {
@@ -358,9 +368,15 @@ async def scrape_and_upsert():
             prop = item.get("Property", {})
             building = item.get("Building", {})
             address = prop.get("Address", {}).get("AddressText", "")
+            addr_lower = address.lower()
 
-            # Suppress unwanted cities (e.g. Brampton)
-            if any(city in address.lower() for city in SUPPRESSED_CITIES):
+            # Geography gate: keep only target municipalities, and hard-block
+            # any suppressed city. Anything outside the allow-list (Caledon,
+            # Milton, Vaughan, King, etc.) is skipped so we don't waste transit
+            # calls on 2-hour commutes that neither strategy would accept.
+            if any(city in addr_lower for city in SUPPRESSED_CITIES):
+                continue
+            if not any(city in addr_lower for city in ALLOWED_CITIES):
                 continue
 
             beds = parse_int_field(building.get("Bedrooms"))
