@@ -118,14 +118,35 @@ def haversine_km(lat1, lng1, lat2, lng2) -> float:
 
 # ── income ───────────────────────────────────────────────────────
 
-def resolve_income(lat, lng, neigh: dict | None, sb) -> tuple[int | None, str]:
-    """Nearest census Dissemination Area centroid, else neighbourhood table."""
+def load_census_rows(sb) -> list[dict]:
+    """Fetch ALL census_income rows once (Supabase caps at 1000/query, so
+    we paginate). Call once per scrape and pass to resolve_income."""
+    all_rows = []
+    page = 0
+    PAGE = 1000
+    while True:
+        res = (sb.table("census_income")
+               .select("avg_income, lat, lng")
+               .range(page * PAGE, page * PAGE + PAGE - 1)
+               .execute())
+        batch = res.data or []
+        all_rows.extend(batch)
+        if len(batch) < PAGE:
+            break
+        page += 1
+    return all_rows
+
+
+def resolve_income(lat, lng, neigh: dict | None, sb, census_rows: list | None = None) -> tuple[int | None, str]:
+    """Nearest census Dissemination Area centroid, else neighbourhood table.
+    census_rows: pre-loaded list from load_census_rows() (avoids re-querying
+    and the 1000-row Supabase default cap)."""
     if lat and lng:
-        rows = sb.table("census_income").select("avg_income, lat, lng").execute().data
+        rows = census_rows if census_rows is not None else load_census_rows(sb)
         best, best_d = None, 1e9
         for r in rows:
             if r.get("lat") and r.get("lng"):
-                d = haversine_km(lat, lng, r["lat"], r["lng"])
+                d = haversine_km(lat, lng, float(r["lat"]), float(r["lng"]))
                 if d < best_d:
                     best, best_d = r, d
         # Only trust a DA within ~2 km
@@ -138,29 +159,35 @@ def resolve_income(lat, lng, neigh: dict | None, sb) -> tuple[int | None, str]:
 
 # ── school ───────────────────────────────────────────────────────
 
-def resolve_school(lat, lng, address: str, neigh: dict | None, sb) -> tuple[float | None, str]:
-    """Nearest Fraser-rated school by lat/lng or catchment keyword,
-    else neighbourhood table."""
-    schools = sb.table("schools").select("*").execute().data
+def resolve_school(lat, lng, address: str, neigh: dict | None, sb, schools: list | None = None) -> tuple[float | None, str]:
+    """Fraser-rated school by catchment keyword or nearest by distance.
+    schools: pre-loaded list (avoids re-querying per listing).
+    Falls back to nearest school at any distance rather than dropping the
+    listing, since 25 schools don't blanket the whole GTA."""
+    if schools is None:
+        schools = sb.table("schools").select("*").execute().data
     addr_l = (address or "").lower()
 
-    # keyword catchment match first
+    # 1. keyword catchment match first (most accurate)
     for s in schools:
         for kw in (s.get("keywords") or []):
             if kw in addr_l and s.get("fraser_rating"):
                 return float(s["fraser_rating"]), "fraser"
 
-    # nearest school by distance
+    # 2. nearest school by distance
     if lat and lng:
         best, best_d = None, 1e9
         for s in schools:
             if s.get("lat") and s.get("lng"):
-                d = haversine_km(lat, lng, s["lat"], s["lng"])
+                d = haversine_km(lat, lng, float(s["lat"]), float(s["lng"]))
                 if d < best_d:
                     best, best_d = s, d
-        if best and best_d <= 2.5 and best.get("fraser_rating"):
-            return float(best["fraser_rating"]), "fraser"
+        if best and best.get("fraser_rating"):
+            # Close match = high confidence; far match = areal proxy, still used
+            src = "fraser" if best_d <= 2.5 else "fraser_area"
+            return float(best["fraser_rating"]), src
 
+    # 3. neighbourhood table
     if neigh and neigh.get("school_rating"):
         return float(neigh["school_rating"]), "table"
     return None, "missing"

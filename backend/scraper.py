@@ -13,7 +13,7 @@ from strategies import is_eligible_for
 from transit import TransitLookup
 from enrichment import (
     resolve_sqft, resolve_income, resolve_school, resolve_canopy,
-    check_completeness,
+    check_completeness, load_census_rows,
 )
 
 REALTOR_API = "https://api2.realtor.ca/Listing.svc/PropertySearch_Post"
@@ -264,6 +264,13 @@ async def scrape_and_upsert():
     upserted = 0
     skipped_price = 0
     dropped_incomplete = 0
+    drop_reasons = {}  # field -> count of listings missing it
+
+    # Load reference data ONCE (avoids Supabase's 1000-row default cap and
+    # re-querying 8000+ census rows per listing).
+    census_rows = load_census_rows(sb)
+    schools_all = sb.table("schools").select("*").execute().data
+    print(f"[scraper] loaded {len(census_rows)} census DAs, {len(schools_all)} schools")
 
     # Transit lookups (Google Distance Matrix). Cache both TTC + GO values so we
     # don't re-charge for listings already scored.
@@ -320,8 +327,8 @@ async def scrape_and_upsert():
 
             # ── ENRICHMENT: fill each metric from best available source ──
             sqft, sqft_src           = resolve_sqft(item, address, sb)
-            income, income_src       = resolve_income(lat, lng, neigh, sb)
-            school, school_src       = resolve_school(lat, lng, address, neigh, sb)
+            income, income_src       = resolve_income(lat, lng, neigh, sb, census_rows)
+            school, school_src       = resolve_school(lat, lng, address, neigh, sb, schools_all)
             canopy, canopy_src       = resolve_canopy(neigh)
 
             # ── COMPLETENESS GATE ──
@@ -331,7 +338,8 @@ async def scrape_and_upsert():
             })
             if not complete:
                 dropped_incomplete += 1
-                print(f"[scraper] dropping {mls_id} — missing {missing}")
+                for f in missing:
+                    drop_reasons[f] = drop_reasons.get(f, 0) + 1
                 # Ensure a previously-stored version is deactivated
                 sb.table("listings").update(
                     {"is_active": False, "data_complete": False, "missing_fields": missing}
@@ -408,3 +416,7 @@ async def scrape_and_upsert():
     print(f"[scraper] done — upserted {upserted}, skipped {skipped_price} (price=0), "
           f"dropped {dropped_incomplete} (incomplete data), "
           f"transit API calls: {transit.calls_made}")
+    if drop_reasons:
+        breakdown = ", ".join(f"{field}={n}" for field, n in
+                              sorted(drop_reasons.items(), key=lambda x: -x[1]))
+        print(f"[scraper] drop reasons (listings missing each field): {breakdown}")
