@@ -386,7 +386,15 @@ async def scrape_and_upsert():
             ownership = prop.get("OwnershipType", "")
             lat = float(prop.get("Address", {}).get("Latitude", 0) or 0)
             lng = float(prop.get("Address", {}).get("Longitude", 0) or 0)
-            photo = (prop.get("Photo") or [{}])[0].get("LowResPath", "")
+            # Realtor.ca photo objects expose several resolutions. Prefer the
+            # highest available so cards aren't upscaled/blurry; fall back down.
+            photo_obj = (prop.get("Photo") or [{}])[0]
+            photo = (
+                photo_obj.get("HighResPath")
+                or photo_obj.get("MedResPath")
+                or photo_obj.get("LowResPath")
+                or ""
+            )
             realtor_url = build_realtor_url(item)
             listed_str = item.get("InsertedDateUtc", "")[:10] if item.get("InsertedDateUtc") else None
 
