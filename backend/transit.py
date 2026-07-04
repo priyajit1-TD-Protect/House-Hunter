@@ -15,11 +15,11 @@ UNION_LAT = 43.6452
 UNION_LNG = -79.3806
 
 # Hard safety cap: never exceed this many API calls per run.
-# 5 departure samples x 2 modes (TTC+GO) = 10 calls per NEW listing.
-# Sized to cover a full first run of up to ~500 eligible listings (5000 calls).
-# Cache means steady-state runs only call for new listings, so this rarely binds.
-# Cost: first full run ~$25-50 against credit; steady-state a few $/month.
-MAX_TRANSIT_LOOKUPS_PER_RUN = 5000
+# 5 departure samples per listing (unrestricted transit, one query each).
+# Sized to cover a full first run of the entire matching inventory (~1100
+# eligible listings x 5 = 5500). Cache means steady-state runs only call for
+# NEW listings, so this rarely binds. First full run ~$28-55 against credit.
+MAX_TRANSIT_LOOKUPS_PER_RUN = 6000
 
 # Eastern Time offset (EDT = UTC-4). Toronto is on daylight time most of the year;
 # for a commute estimate this is close enough and avoids a tz dependency.

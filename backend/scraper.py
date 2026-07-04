@@ -23,7 +23,7 @@ SCRAPER_API_ENDPOINT = "https://async.scraperapi.com/jobs"
 # Hard filters applied to every listing:
 # per-strategy door-to-door transit ceilings, and suppressed cities.
 MAX_TRANSIT_NUCLEUS = 60      # TTC to Union
-MAX_TRANSIT_BIG_FAMILY = 70   # GO/transit door-to-door to Union (1h10m)
+MAX_TRANSIT_BIG_FAMILY = 75   # GO/transit door-to-door to Union (1h15m)
 
 # Only keep listings in these municipalities. An allow-list (rather than a
 # block-list) automatically excludes far-flung areas like Caledon, Milton,
@@ -279,11 +279,11 @@ async def scrape_and_upsert():
     all_results = []
 
     async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
-        # Paginate until we run out (a page < 50 means the end). Ceiling of 20
-        # pages = 1000 listings, plenty for freehold $1M-1.7M across 5 regions.
-        # The early-break below stops as soon as a short page is returned, so we
-        # only make as many calls as there are actual pages.
-        MAX_PAGES = 20
+        # Capture the FULL matching inventory (not just the newest N). Realtor.ca
+        # returns ~3128 matches; at 50/page that's ~63 pages. Ceiling of 70
+        # covers it with margin. The early-break below stops as soon as a short
+        # page is returned, so we only make as many calls as there are real pages.
+        MAX_PAGES = 70
         for page in range(1, MAX_PAGES + 1):
             results = await scrape_page_via_scraperapi(client, page)
             all_results.extend(results)
@@ -455,7 +455,7 @@ async def scrape_and_upsert():
             elig_big = is_eligible_for(prop_type, building_type, ownership, "big_family")
 
             # One door-to-door commute value (all transit modes) serves both
-            # strategies — they differ only by ceiling (60 vs 70), not by mode.
+            # strategies — they differ only by ceiling (60 vs 75), not by mode.
             # Reuse cache if present; otherwise measure once (5 departures).
             commute = cached_ttc.get(mls_id) or cached_go.get(mls_id)
             if commute is None:
@@ -465,7 +465,7 @@ async def scrape_and_upsert():
 
             # Hard caps per strategy. Hide-until-measured: a listing is only
             # eligible once real transit is known AND within the ceiling.
-            # Nucleus judged on TTC (<=60), Big Family on GO (<=70).
+            # Nucleus judged on TTC (<=60), Big Family on GO (<=75).
             if transit_ttc is None or transit_ttc > MAX_TRANSIT_NUCLEUS:
                 elig_nucleus = False
             if transit_go is None or transit_go > MAX_TRANSIT_BIG_FAMILY:

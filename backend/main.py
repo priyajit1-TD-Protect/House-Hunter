@@ -81,9 +81,9 @@ def get_listings(
 
     def within_transit(r):
         # Hide-until-measured: require a known transit time within the ceiling.
-        # Nucleus TTC <=60, Big Family GO <=70. Unknown (None) is NOT shown.
+        # Nucleus TTC <=60, Big Family GO <=75. Unknown (None) is NOT shown.
         t = r["listing_scores"][0].get(transit_col)
-        ceiling = 60 if strategy == "nucleus" else 70
+        ceiling = 60 if strategy == "nucleus" else 75
         return t is not None and t <= ceiling
 
     def not_suppressed(r):
