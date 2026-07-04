@@ -242,7 +242,11 @@ async def scrape_page_via_scraperapi(client: httpx.AsyncClient, page: int) -> li
                 try:
                     data = json.loads(response_body)
                     results = data.get("Results", [])
-                    print(f"[scraper] page {page}: {len(results)} raw listings")
+                    paging = data.get("Paging", {})
+                    total = paging.get("TotalRecords", "?")
+                    max_pages = paging.get("MaxPageIndex", "?")
+                    print(f"[scraper] page {page}: {len(results)} listings "
+                          f"(total available: {total}, max pages: {max_pages})")
                     return results
                 except Exception as e:
                     print(f"[scraper] JSON parse error: {e}")
@@ -265,8 +269,12 @@ async def scrape_and_upsert():
     all_results = []
 
     async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
-        # Wider area now spans 4 regions — pull up to 6 pages (300 listings)
-        for page in range(1, 7):
+        # Paginate until we run out (a page < 50 means the end). Ceiling of 20
+        # pages = 1000 listings, plenty for freehold $1M-1.7M across 5 regions.
+        # The early-break below stops as soon as a short page is returned, so we
+        # only make as many calls as there are actual pages.
+        MAX_PAGES = 20
+        for page in range(1, MAX_PAGES + 1):
             results = await scrape_page_via_scraperapi(client, page)
             all_results.extend(results)
             if len(results) < 50:

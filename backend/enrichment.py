@@ -138,20 +138,35 @@ def load_census_rows(sb) -> list[dict]:
 
 
 def resolve_income(lat, lng, neigh: dict | None, sb, census_rows: list | None = None) -> tuple[int | None, str]:
-    """Nearest census Dissemination Area centroid, else neighbourhood table.
-    census_rows: pre-loaded list from load_census_rows() (avoids re-querying
-    and the 1000-row Supabase default cap)."""
+    """Income from census Dissemination Areas near the listing.
+
+    Realtor.ca coordinates are sometimes imprecise (off by 1-2 km), which can
+    snap a listing to a single unrepresentative DA next door. To be robust, we
+    average the median income of ALL DAs within 1.5 km (falling back to the
+    single nearest within 2 km). This smooths out coordinate noise so one
+    wealthy adjacent DA can't skew a middle-income listing."""
     if lat and lng:
         rows = census_rows if census_rows is not None else load_census_rows(sb)
-        best, best_d = None, 1e9
+        # collect (distance, income) for valid rows
+        near = []
+        nearest = None
+        nearest_d = 1e9
         for r in rows:
-            if r.get("lat") and r.get("lng"):
-                d = haversine_km(lat, lng, float(r["lat"]), float(r["lng"]))
-                if d < best_d:
-                    best, best_d = r, d
-        # Only trust a DA within ~2 km
-        if best and best_d <= 2.0 and best.get("avg_income"):
-            return best["avg_income"], "census"
+            rlat, rlng, inc = r.get("lat"), r.get("lng"), r.get("avg_income")
+            if rlat is None or rlng is None or not inc:
+                continue
+            d = haversine_km(lat, lng, float(rlat), float(rlng))
+            if d < nearest_d:
+                nearest, nearest_d = inc, d
+            if d <= 1.5:
+                near.append(inc)
+        # Prefer the local average of DAs within 1.5 km
+        if near:
+            avg = int(sum(near) / len(near))
+            return avg, "census"
+        # Fall back to the single nearest within 2 km
+        if nearest is not None and nearest_d <= 2.0:
+            return nearest, "census"
     if neigh and neigh.get("avg_income"):
         return neigh["avg_income"], "table"
     return None, "missing"

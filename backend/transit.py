@@ -1,6 +1,6 @@
 """
 Real transit time to Union Station via Google Distance Matrix API (transit mode).
-Targets weekday 8:00 AM arrival. Caches results in the DB to avoid re-charging
+Targets weekday morning departures (leaving home). Caches results in the DB to avoid re-charging
 for listings whose coordinates haven't changed.
 """
 import os
@@ -14,26 +14,27 @@ DISTANCE_MATRIX_URL = "https://maps.googleapis.com/maps/api/distancematrix/json"
 UNION_LAT = 43.6452
 UNION_LNG = -79.3806
 
-# Hard safety cap: never make more than this many API calls in a single run.
-# 207 listings x 2 calls (TTC+GO) = ~414 for a full fresh measure. Cache means
-# steady-state runs only call for NEW listings, so this cap rarely binds and
-# monthly cost stays ~$14 (see loaders/README for the math).
-MAX_TRANSIT_LOOKUPS_PER_RUN = 450
+# Hard safety cap: never exceed this many API calls per run.
+# 5 departure samples x 2 modes (TTC+GO) = 10 calls per NEW listing.
+# Sized to cover a full first run of up to ~500 eligible listings (5000 calls).
+# Cache means steady-state runs only call for new listings, so this rarely binds.
+# Cost: first full run ~$25-50 against credit; steady-state a few $/month.
+MAX_TRANSIT_LOOKUPS_PER_RUN = 5000
 
 # Eastern Time offset (EDT = UTC-4). Toronto is on daylight time most of the year;
 # for a commute estimate this is close enough and avoids a tz dependency.
 ET_OFFSET_HOURS = -4
 
 
-def next_weekday_8am_epoch() -> int:
-    """Return the epoch seconds for the next upcoming weekday at 08:00 ET.
-    Google transit requires arrival_time in the future."""
+def next_weekday_epoch(hour: int = 8, minute: int = 0) -> int:
+    """Epoch seconds for the next upcoming weekday at HH:MM ET.
+    Used as a transit departure_time (must be in the future)."""
     now_utc = datetime.now(timezone.utc)
     now_et = now_utc + timedelta(hours=ET_OFFSET_HOURS)
 
-    target = now_et.replace(hour=8, minute=0, second=0, microsecond=0)
+    target = now_et.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
-    # If 8 AM today already passed, move to tomorrow
+    # If the target time today already passed, move to tomorrow
     if target <= now_et:
         target += timedelta(days=1)
 
@@ -41,9 +42,20 @@ def next_weekday_8am_epoch() -> int:
     while target.weekday() >= 5:
         target += timedelta(days=1)
 
-    # Convert back to UTC epoch
     target_utc = target - timedelta(hours=ET_OFFSET_HOURS)
     return int(target_utc.timestamp())
+
+
+# Backwards-compatible alias
+def next_weekday_8am_epoch() -> int:
+    return next_weekday_epoch(8, 0)
+
+
+# Departure times we sample (weekday morning, leaving home). We take the MAX
+# across these so a single unusually favourable departure can't understate a
+# typical commute. 5 samples across the peak window (7:30-8:30) reflect leaving
+# home to reach the office at Union.
+SAMPLE_DEPARTURES = [(7, 30), (7, 45), (8, 0), (8, 15), (8, 30)]
 
 
 class TransitLookup:
@@ -52,9 +64,10 @@ class TransitLookup:
     def __init__(self):
         self.calls_made = 0
 
-    def _lookup(self, lat: float, lng: float, transit_mode: str | None) -> int | None:
-        """Shared Distance Matrix call. transit_mode None = default (all modes).
-        Pass 'rail|train|subway|tram|bus' to bias toward regional rail (GO)."""
+    def _lookup(self, lat: float, lng: float, transit_mode: str | None,
+                departure_epoch: int) -> int | None:
+        """Single Distance Matrix call for one departure time (leaving home).
+        transit_mode None = all modes; pass 'rail|train|subway|bus' for GO."""
         if not GOOGLE_MAPS_API_KEY:
             return None
         if not lat or not lng:
@@ -67,7 +80,7 @@ class TransitLookup:
             "origins": f"{lat},{lng}",
             "destinations": f"{UNION_LAT},{UNION_LNG}",
             "mode": "transit",
-            "arrival_time": str(next_weekday_8am_epoch()),
+            "departure_time": str(departure_epoch),
             "key": GOOGLE_MAPS_API_KEY,
         }
         if transit_mode:
@@ -94,12 +107,26 @@ class TransitLookup:
             print(f"[transit] lookup error (mode={transit_mode}): {e}")
             return None
 
+    def _sampled_max(self, lat: float, lng: float, transit_mode: str | None) -> int | None:
+        """Query several weekday morning departure times (leaving home) and
+        return the MAX minutes, so a single unusually favourable departure can't
+        understate a typical commute. Returns None only if EVERY sample failed."""
+        results = []
+        for hour, minute in SAMPLE_DEPARTURES:
+            if self.calls_made >= MAX_TRANSIT_LOOKUPS_PER_RUN:
+                break
+            epoch = next_weekday_epoch(hour, minute)
+            val = self._lookup(lat, lng, transit_mode, epoch)
+            if val is not None:
+                results.append(val)
+        return max(results) if results else None
+
     def get_transit_minutes(self, lat: float, lng: float) -> int | None:
-        """TTC-only style commute to Union (Nucleus strategy).
+        """TTC-style commute to Union (Nucleus), worst of 5 sampled departures.
         Biases toward local transit modes (subway/bus/tram/streetcar)."""
-        return self._lookup(lat, lng, transit_mode="subway|bus|tram")
+        return self._sampled_max(lat, lng, transit_mode="subway|bus|tram")
 
     def get_go_transit_minutes(self, lat: float, lng: float) -> int | None:
         """Door-to-door commute to Union including GO/regional rail
-        (Happy Big Family strategy). 'rail|train' biases toward GO."""
-        return self._lookup(lat, lng, transit_mode="rail|train|subway|bus")
+        (Happy Big Family), worst of 5 sampled departures."""
+        return self._sampled_max(lat, lng, transit_mode="rail|train|subway|bus")
