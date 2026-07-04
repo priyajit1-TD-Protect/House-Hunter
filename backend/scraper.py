@@ -430,14 +430,14 @@ async def scrape_and_upsert():
             elig_nucleus = is_eligible_for(prop_type, building_type, ownership, "nucleus")
             elig_big = is_eligible_for(prop_type, building_type, ownership, "big_family")
 
-            # Two transit measurements (cached where possible)
-            transit_ttc = cached_ttc.get(mls_id)
-            if transit_ttc is None:
-                transit_ttc = transit.get_transit_minutes(lat, lng)
-
-            transit_go = cached_go.get(mls_id)
-            if transit_go is None:
-                transit_go = transit.get_go_transit_minutes(lat, lng)
+            # One door-to-door commute value (all transit modes) serves both
+            # strategies — they differ only by ceiling (60 vs 70), not by mode.
+            # Reuse cache if present; otherwise measure once (5 departures).
+            commute = cached_ttc.get(mls_id) or cached_go.get(mls_id)
+            if commute is None:
+                commute = transit.get_commute_minutes(lat, lng)
+            transit_ttc = commute
+            transit_go = commute
 
             # Hard caps per strategy. Hide-until-measured: a listing is only
             # eligible once real transit is known AND within the ceiling.

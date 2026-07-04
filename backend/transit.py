@@ -83,8 +83,14 @@ class TransitLookup:
             "departure_time": str(departure_epoch),
             "key": GOOGLE_MAPS_API_KEY,
         }
+        # NOTE: We deliberately do NOT set transit_mode. Restricting it (e.g.
+        # 'rail|train|subway|bus') combined with departure_time makes Google
+        # return ZERO_RESULTS on many trips. Unrestricted transit already
+        # includes GO rail, TTC subway, buses, and streetcars — Google picks the
+        # fastest real route, which is what a commuter actually experiences.
         if transit_mode:
-            params["transit_mode"] = transit_mode
+            # kept for API compatibility but intentionally unused
+            pass
 
         try:
             self.calls_made += 1
@@ -107,26 +113,32 @@ class TransitLookup:
             print(f"[transit] lookup error (mode={transit_mode}): {e}")
             return None
 
-    def _sampled_max(self, lat: float, lng: float, transit_mode: str | None) -> int | None:
+    def _sampled_max(self, lat: float, lng: float) -> int | None:
         """Query several weekday morning departure times (leaving home) and
         return the MAX minutes, so a single unusually favourable departure can't
-        understate a typical commute. Returns None only if EVERY sample failed."""
+        understate a typical commute. Unrestricted transit (all modes: GO rail,
+        TTC subway, bus, streetcar) — Google picks the fastest real route.
+        Returns None only if EVERY sample failed."""
         results = []
         for hour, minute in SAMPLE_DEPARTURES:
             if self.calls_made >= MAX_TRANSIT_LOOKUPS_PER_RUN:
                 break
             epoch = next_weekday_epoch(hour, minute)
-            val = self._lookup(lat, lng, transit_mode, epoch)
+            val = self._lookup(lat, lng, None, epoch)
             if val is not None:
                 results.append(val)
         return max(results) if results else None
 
+    def get_commute_minutes(self, lat: float, lng: float) -> int | None:
+        """Door-to-door commute to Union using all transit modes, worst of 5
+        sampled morning departures. One value serves both strategies — the
+        difference between Nucleus and Big Family is the ceiling (60 vs 70),
+        not the transit mode."""
+        return self._sampled_max(lat, lng)
+
+    # Backwards-compatible aliases (both now return the same unrestricted value)
     def get_transit_minutes(self, lat: float, lng: float) -> int | None:
-        """TTC-style commute to Union (Nucleus), worst of 5 sampled departures.
-        Biases toward local transit modes (subway/bus/tram/streetcar)."""
-        return self._sampled_max(lat, lng, transit_mode="subway|bus|tram")
+        return self.get_commute_minutes(lat, lng)
 
     def get_go_transit_minutes(self, lat: float, lng: float) -> int | None:
-        """Door-to-door commute to Union including GO/regional rail
-        (Happy Big Family), worst of 5 sampled departures."""
-        return self._sampled_max(lat, lng, transit_mode="rail|train|subway|bus")
+        return self.get_commute_minutes(lat, lng)
