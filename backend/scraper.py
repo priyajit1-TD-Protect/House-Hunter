@@ -274,7 +274,9 @@ async def scrape_page_via_scraperapi(client: httpx.AsyncClient, page: int) -> li
 
 
 async def scrape_and_upsert():
-    """Main scrape job — called on startup and every 6 hours."""
+    """Main scrape job — called on startup and every 12 hours."""
+    from datetime import datetime, timezone
+    run_started = datetime.now(timezone.utc).isoformat()
     sb = supabase_client()
     all_results = []
 
@@ -450,6 +452,10 @@ async def scrape_and_upsert():
                 "is_active": True,
             }
             sb.table("listings").upsert(listing_row).execute()
+            # Track as active-this-run IMMEDIATELY after the listings upsert, so
+            # a later exception (e.g. in scoring) can't orphan it and cause the
+            # stale-marker to wrongly deactivate a listing we just wrote active.
+            upserted_active_ids.append(mls_id)
 
             # Per-strategy eligibility (property type)
             elig_nucleus = is_eligible_for(prop_type, building_type, ownership, "nucleus")
@@ -484,7 +490,6 @@ async def scrape_and_upsert():
                 on_conflict="listing_id"
             ).execute()
             upserted += 1
-            upserted_active_ids.append(mls_id)
 
         except Exception as e:
             print(f"[scraper] error on {item.get('MlsNumber')}: {e}")
@@ -497,12 +502,15 @@ async def scrape_and_upsert():
     seen_active = set(upserted_active_ids)
     print(f"[scraper] {len(seen_active)} listings active this run")
 
-    # Fetch all current listing ids (paginated past the 1000-row cap)
+    # Fetch all current listings (paginated past the 1000-row cap). We pull
+    # updated_at too: any listing touched during this run is spared from
+    # deactivation even if its id somehow missed the seen_active set — a
+    # belt-and-suspenders guard against orphaning valid listings.
     all_db_ids = []
     _pg, _P = 0, 1000
     while True:
         batch = (sb.table("listings")
-                 .select("id, is_active")
+                 .select("id, is_active, updated_at")
                  .range(_pg * _P, _pg * _P + _P - 1)
                  .execute().data)
         all_db_ids.extend(batch)
@@ -510,10 +518,14 @@ async def scrape_and_upsert():
             break
         _pg += 1
 
-    # Deactivate listings not seen this run (only those currently active, in
-    # small batches to keep each request small and safe).
-    to_deactivate = [r["id"] for r in all_db_ids
-                     if r["id"] not in seen_active and r.get("is_active")]
+    # Deactivate only listings that are: currently active, NOT seen this run,
+    # AND not updated during this run.
+    to_deactivate = [
+        r["id"] for r in all_db_ids
+        if r.get("is_active")
+        and r["id"] not in seen_active
+        and (not r.get("updated_at") or r["updated_at"] < run_started)
+    ]
     for i in range(0, len(to_deactivate), 100):
         chunk = to_deactivate[i:i + 100]
         sb.table("listings").update({"is_active": False}).in_("id", chunk).execute()
