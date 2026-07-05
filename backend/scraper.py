@@ -317,6 +317,7 @@ async def scrape_and_upsert():
     skipped_price = 0
     dropped_incomplete = 0
     drop_reasons = {}  # field -> count of listings missing it
+    upserted_active_ids = []  # ids set active this run (for safe stale-marking)
 
     # Load reference data ONCE (avoids Supabase's 1000-row default cap and
     # re-querying 8000+ census rows per listing).
@@ -483,15 +484,41 @@ async def scrape_and_upsert():
                 on_conflict="listing_id"
             ).execute()
             upserted += 1
+            upserted_active_ids.append(mls_id)
 
         except Exception as e:
             print(f"[scraper] error on {item.get('MlsNumber')}: {e}")
 
-    # Mark stale listings inactive
-    active_ids = [item.get("MlsNumber") for item in candidates if item.get("MlsNumber")]
-    if active_ids:
-        sb.table("listings").update({"is_active": False}).not_.in_("id", active_ids).execute()
+    # Mark stale listings inactive — i.e. listings in the DB that were NOT
+    # seen as active in this run. The old approach passed all ~2000 ids into a
+    # single .not_.in_() which overflowed the request URL and silently
+    # deactivated valid listings. Instead we track the ids we upserted active
+    # this run, then paginate the DB and deactivate only those not in the set.
+    seen_active = set(upserted_active_ids)
+    print(f"[scraper] {len(seen_active)} listings active this run")
 
+    # Fetch all current listing ids (paginated past the 1000-row cap)
+    all_db_ids = []
+    _pg, _P = 0, 1000
+    while True:
+        batch = (sb.table("listings")
+                 .select("id, is_active")
+                 .range(_pg * _P, _pg * _P + _P - 1)
+                 .execute().data)
+        all_db_ids.extend(batch)
+        if len(batch) < _P:
+            break
+        _pg += 1
+
+    # Deactivate listings not seen this run (only those currently active, in
+    # small batches to keep each request small and safe).
+    to_deactivate = [r["id"] for r in all_db_ids
+                     if r["id"] not in seen_active and r.get("is_active")]
+    for i in range(0, len(to_deactivate), 100):
+        chunk = to_deactivate[i:i + 100]
+        sb.table("listings").update({"is_active": False}).in_("id", chunk).execute()
+
+    print(f"[scraper] deactivated {len(to_deactivate)} stale listings")
     print(f"[scraper] done — upserted {upserted}, skipped {skipped_price} (price=0), "
           f"dropped {dropped_incomplete} (incomplete data), "
           f"transit API calls: {transit.calls_made}")
